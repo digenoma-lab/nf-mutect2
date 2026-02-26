@@ -21,6 +21,8 @@ params.wgs              = true
 params.sample_sheet     = null          // CSV with columns: subject,type,tumor_sample(optional),sample_id,fastq1,fastq2,cram
 params.canonical_only   = true          // default restrict to autosomes + sex chromosomes
 params.extra_intervals  = null          // BED/interval_list to add non-canonical contigs
+params.run_bqsr         = false         // optional BQSR; disabled by default
+params.debug            = false
 
 // ------------------------------------------------------------------
 // Processes
@@ -40,6 +42,11 @@ process GATK_CREATE_DICT {
     """
     gatk CreateSequenceDictionary -R ${reference} -O genome.dict
     """
+
+    stub:
+    """
+    touch genome.dict
+    """
 }
 
 process SAMTOOLS_FAIDX {
@@ -55,6 +62,61 @@ process SAMTOOLS_FAIDX {
     script:
     """
     samtools faidx ${reference}
+    """
+
+    stub:
+    """
+    touch ${reference}.fai
+    """
+}
+
+process BWA_MEM2_INDEX {
+    tag "$reference.baseName"
+    publishDir "${params.outdir}/ref", mode: 'copy'
+
+    input:
+    path reference
+
+    output:
+    path "*.{0123,amb,ann,bwt.2bit.64,pac}", emit: index
+
+    script:
+    """
+    bwa-mem2 index ${reference}
+    """
+
+    stub:
+    """
+    touch ${reference}.0123 ${reference}.amb ${reference}.ann ${reference}.bwt.2bit.64 ${reference}.pac
+    """
+}
+
+process BWA_MEM2_ALIGN {
+    tag "$meta.id"
+    publishDir "${params.outdir}/align", mode: 'copy', pattern: "*.cram*"
+
+    input:
+    tuple val(meta), path(reads)
+    path reference
+    path index
+    path ref_fai
+
+    output:
+    tuple val(meta), path("${meta.id}.cram"), path("${meta.id}.cram.crai"), emit: cram_crai
+
+    script:
+    def rg = "@RG\\tID:${meta.id}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}"
+    """
+    bwa-mem2 mem -t ${task.cpus} -R "${rg}" ${reference} ${reads} | \\
+      samtools sort -@ ${task.cpus} --reference ${reference} -O BAM - | \\
+      samtools fixmate -m - - | \\
+      samtools sort -@ ${task.cpus} - | \\
+      samtools markdup -@ ${task.cpus} --write-index -O CRAM --reference ${reference} - ${meta.id}.cram
+    """
+
+    stub:
+    """
+    touch ${meta.id}.cram ${meta.id}.cram.crai
     """
 }
 
@@ -76,8 +138,13 @@ process MAKE_CANONICAL_BED {
             if(\$i~/^SN:/){sn=substr(\$i,4)}
             if(\$i~/^LN:/){ln=substr(\$i,4)}
         }
-        if(sn ~ /^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y)$/){print sn,0,ln}
+        if(sn ~ /^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y)\$/){print sn,0,ln}
     }' ${dict} > canonical_autosomes_sex.bed
+    """
+
+    stub:
+    """
+    printf "chr1\t0\t1000000\n" > canonical_autosomes_sex.bed
     """
 }
 
@@ -87,7 +154,7 @@ process MERGE_INTERVALS {
 
     input:
     path primary
-    path extra optional: true
+    path extra
 
     output:
     path "merged_intervals.bed", emit: bed
@@ -100,36 +167,32 @@ process MERGE_INTERVALS {
     fi
     sort -k1,1 -k2,2n merged_intervals.bed | uniq > merged_intervals.tmp && mv merged_intervals.tmp merged_intervals.bed
     """
+
+    stub:
+    """
+    cp ${primary} merged_intervals.bed
+    """
 }
 
 process FASTQC {
-    tag "$sampleId-mem"
-    //label 'process_medium'
-    publishDir "$params.outdir/QC/FASTQC", mode: "copy"
-
-
+    tag "$meta.id"
+    publishDir "${params.outdir}/qc/fastqc", mode: "copy"
 
     input:
-    tuple val(sampleId), val(part), file(read1), file(read2)
+    tuple val(meta), path(reads)
 
     output:
-    path("${sampleId}-${part}.fastqc"), emit: fqc
+    tuple val(meta), path("*.zip"), emit: zip
 
     script:
-    if(params.debug == true){
     """
-    echo fastqc -o ${sampleId}-${part}.fastqc $read1 $read2
-    mkdir -p ${sampleId}-${part}.fastqc
-    touch ${sampleId}-${part}.fastqc/report.fastqc
+    fastqc -q ${reads}
+    """
 
+    stub:
     """
-    } else{
+    touch ${meta.id}_fastqc.zip
     """
-    mkdir -p ${sampleId}-${part}.fastqc
-    fastqc -t $task.cpus -o ${sampleId}-${part}.fastqc $read1 $read2
-    """
-    }
-
 }
 
 //we do run bwa-mem2 or bwa mem
@@ -326,6 +389,11 @@ process VALIDATE_CRAM {
     samtools quickcheck ${cram}
     ln -s ${cram}.crai ${cram}.crai || true
     """
+
+    stub:
+    """
+    [ -f ${cram}.crai ] || touch ${cram}.crai
+    """
 }
 
 process GATK_MARKDUPLICATES {
@@ -371,6 +439,11 @@ process GATK_BASERECALIBRATOR {
       --known-sites ${known_sites} \\
       -O ${meta.id}_recal.table
     """
+
+    stub:
+    """
+    touch ${meta.id}_recal.table
+    """
 }
 
 process GATK_APPLYBQSR {
@@ -394,6 +467,11 @@ process GATK_APPLYBQSR {
       -O ${meta.id}_recal.cram \\
       --create-output-bam-index true
     """
+
+    stub:
+    """
+    touch ${meta.id}_recal.cram ${meta.id}_recal.cram.crai
+    """
 }
 
 process GATK_SPLITINTERVALS {
@@ -403,7 +481,7 @@ process GATK_SPLITINTERVALS {
     input:
     path reference
     path dict
-    path base_intervals optional: true
+    path base_intervals
     val scatter_count
 
     output:
@@ -422,6 +500,12 @@ process GATK_SPLITINTERVALS {
       --subdivision-mode BALANCING_WITHOUT_INTERVAL_SUBDIVISION \\
       -O intervals
     """
+
+    stub:
+    """
+    mkdir -p intervals
+    touch intervals/0000-scattered.interval_list intervals/0001-scattered.interval_list
+    """
 }
 
 process GATK_MUTECT2_SCATTER {
@@ -431,7 +515,7 @@ process GATK_MUTECT2_SCATTER {
     input:
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai), val(normal_meta), path(normal_cram), path(normal_crai)
     path reference
-    path pon optional: true
+    val pon
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}.vcf.gz"), path("${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi"), emit: vcf
@@ -452,6 +536,14 @@ process GATK_MUTECT2_SCATTER {
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
     """
+
+    stub:
+    """
+    touch ${tumor_meta.id}_${interval.baseName}.vcf.gz
+    touch ${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi
+    touch ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz
+    touch ${tumor_meta.id}_${interval.baseName}.stats
+    """
 }
 
 process GATK_MUTECT2_SCATTER_TONLY {
@@ -461,7 +553,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
     input:
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai)
     path reference
-    path pon optional: true
+    val pon
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}.vcf.gz"), path("${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi"), emit: vcf
@@ -479,6 +571,14 @@ process GATK_MUTECT2_SCATTER_TONLY {
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
+    """
+
+    stub:
+    """
+    touch ${tumor_meta.id}_${interval.baseName}.vcf.gz
+    touch ${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi
+    touch ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz
+    touch ${tumor_meta.id}_${interval.baseName}.stats
     """
 }
 
@@ -502,6 +602,11 @@ process GATK_MERGEVCFS {
       -O ${meta.id}_merged.vcf.gz
     gatk IndexFeatureFile -I ${meta.id}_merged.vcf.gz
     """
+
+    stub:
+    """
+    touch ${meta.id}_merged.vcf.gz ${meta.id}_merged.vcf.gz.tbi
+    """
 }
 
 process GATK_LEARNREADORIENTATIONMODEL {
@@ -519,6 +624,11 @@ process GATK_LEARNREADORIENTATIONMODEL {
     gatk LearnReadOrientationModel \\
       ${inputs} \\
       -O ${meta.id}_read_orientation_model.tar.gz
+    """
+
+    stub:
+    """
+    touch ${meta.id}_read_orientation_model.tar.gz
     """
 }
 
@@ -547,7 +657,7 @@ process GATK_CALCULATECONTAMINATION {
 
     input:
     tuple val(tumor_meta), path(tumor_pileups)
-    path normal_pileups optional: true
+    path normal_pileups
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_contamination.table"), emit: contamination
@@ -569,7 +679,7 @@ process GATK_FILTERMUTECTCALLS {
     publishDir "${params.outdir}/variants/filtered", mode: 'copy'
 
     input:
-    tuple val(meta), path(vcf), path(tbi), path(contamination), path(segments) optional: true, path(orientation_model)
+    tuple val(meta), path(vcf), path(tbi), path(contamination), path(segments), path(orientation_model)
     path reference
 
     output:
@@ -582,10 +692,15 @@ process GATK_FILTERMUTECTCALLS {
       -R ${reference} \\
       -V ${vcf} \\
       --contamination-table ${contamination} \\
-      ${segments ? "--tumor-segmentation ${segments}" : ""} \\
+      --tumor-segmentation ${segments} \\
       --ob-priors ${orientation_model} \\
       -O ${meta.id}_filtered.vcf.gz \\
       --filtering-stats ${meta.id}_filtering_stats.tsv
+    """
+
+    stub:
+    """
+    touch ${meta.id}_filtered.vcf.gz ${meta.id}_filtered.vcf.gz.tbi ${meta.id}_filtering_stats.tsv
     """
 }
 
@@ -601,6 +716,12 @@ process MULTIQC {
     script:
     """
     multiqc .
+    """
+
+    stub:
+    """
+    mkdir -p multiqc_data
+    touch multiqc_report.html
     """
 }
 
@@ -625,6 +746,11 @@ process GATK_CONTAMINATION {
       -O ${tumor_meta.id}_contamination.table \\
       --tumor-segmentation ${tumor_meta.id}_segments.table
     """
+
+    stub:
+    """
+    touch ${tumor_meta.id}_contamination.table ${tumor_meta.id}_segments.table
+    """
 }
 
 process GATK_CONTAMINATION_TONLY {
@@ -636,7 +762,7 @@ process GATK_CONTAMINATION_TONLY {
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_contamination.table"), emit: contamination
-    path("${tumor_meta.id}_segments.table"), emit: segments
+    tuple val(tumor_meta), path("${tumor_meta.id}_segments.table"), emit: segments
 
     script:
     """
@@ -645,6 +771,11 @@ process GATK_CONTAMINATION_TONLY {
       -I tumor_pileups.table \\
       -O ${tumor_meta.id}_contamination.table \\
       --tumor-segmentation ${tumor_meta.id}_segments.table
+    """
+
+    stub:
+    """
+    touch ${tumor_meta.id}_contamination.table ${tumor_meta.id}_segments.table
     """
 }
 
@@ -670,6 +801,11 @@ process GATK_MUTECT2_NORMAL {
       --max-mnp-distance 0 \\
       -O ${meta.id}_${interval.baseName}_pon.vcf.gz
     """
+
+    stub:
+    """
+    touch ${meta.id}_${interval.baseName}_pon.vcf.gz
+    """
 }
 
 process GATK_MERGE_PON_NORMAL {
@@ -689,6 +825,11 @@ process GATK_MERGE_PON_NORMAL {
     gatk MergeVcfs ${inputs} -R ${reference} -O ${meta.id}_pon_merged.vcf.gz
     gatk IndexFeatureFile -I ${meta.id}_pon_merged.vcf.gz
     """
+
+    stub:
+    """
+    touch ${meta.id}_pon_merged.vcf.gz
+    """
 }
 
 process GATK_CREATE_SOMATIC_PON {
@@ -707,6 +848,11 @@ process GATK_CREATE_SOMATIC_PON {
       ${inputs} \\
       -O panel_of_normals.vcf.gz
     """
+
+    stub:
+    """
+    touch panel_of_normals.vcf.gz
+    """
 }
 
 // ------------------------------------------------------------------
@@ -721,28 +867,30 @@ workflow {
     if (!params.sample_sheet && (!params.tumor_sample))
         error "Provide --tumor_sample (and --normal_sample if paired) when not using --sample_sheet"
 
-    reference_ch    = Channel.fromPath(params.reference, checkIfExists: true).first()
-    reference_ch.into { ref_dict; ref_fai; ref_bwa; ref_split; ref_mutect; ref_merge; ref_filter; ref_pon }
+    reference_ch    = Channel.fromPath(params.reference, checkIfExists: true)
+    known_sites_ch  = Channel.fromPath(params.known_sites, checkIfExists: true)
 
-    known_sites_ch  = Channel.fromPath(params.known_sites, checkIfExists: true).first()
-    known_sites_ch.into { ks_bqsr; ks_contam_t; ks_contam_n; ks_pon }
-    ks_contam_t.into { ks_contam_paired; ks_contam_tonly }
-
-    dict_ch         = GATK_CREATE_DICT(ref_dict).out.dict
-    canonical_bed   = MAKE_CANONICAL_BED(dict_ch).out.bed
-    fai_ch          = SAMTOOLS_FAIDX(ref_fai).out.fai
-    bwa_idx_ch      = BWA_MEM2_INDEX(ref_bwa).out.index
-    base_interval_seed = params.intervals ? Channel.fromPath(params.intervals, checkIfExists: true).first()
-                                          : (params.canonical_only ? canonical_bed.first() : Channel.empty())
+    GATK_CREATE_DICT(reference_ch)
+    dict_ch = GATK_CREATE_DICT.out.dict
+    MAKE_CANONICAL_BED(dict_ch)
+    canonical_bed = MAKE_CANONICAL_BED.out.bed
+    SAMTOOLS_FAIDX(reference_ch)
+    fai_ch = SAMTOOLS_FAIDX.out.fai
+    BWA_MEM2_INDEX(reference_ch)
+    bwa_idx_ch = BWA_MEM2_INDEX.out.index
+    base_interval_seed = params.intervals ? Channel.fromPath(params.intervals, checkIfExists: true)
+                                          : (params.canonical_only ? canonical_bed : Channel.empty())
     if (params.extra_intervals) {
-        extra_intervals_ch = Channel.fromPath(params.extra_intervals, checkIfExists: true).first()
-        base_interval_seed = MERGE_INTERVALS(base_interval_seed, extra_intervals_ch).out.bed
+        extra_intervals_ch = Channel.fromPath(params.extra_intervals, checkIfExists: true)
+        MERGE_INTERVALS(base_interval_seed, extra_intervals_ch)
+        base_interval_seed = MERGE_INTERVALS.out.bed
     }
-    base_interval_seed.into { intervals_seed_main; intervals_seed_pon }
+    intervals_seed_main = base_interval_seed
+    intervals_seed_pon = base_interval_seed
 
     // Input handling (sample sheet preferred)
-    Channel crams_valid
-    Channel fastqc_zip = Channel.empty()
+    crams_valid = null
+    fastqc_zip = Channel.empty()
 
     if (params.sample_sheet) {
         sample_rows = Channel.fromPath(params.sample_sheet, checkIfExists: true)
@@ -763,15 +911,12 @@ workflow {
         fastq_samples = sample_rows.filter { meta, fastqs, cram -> fastqs }.map { meta, fastqs, cram -> [meta, fastqs] }
         cram_samples  = sample_rows.filter { meta, fastqs, cram -> cram }.map { meta, fastqs, cram -> [meta, cram] }
 
-        if (!fastq_samples.isEmpty()) {
-            FASTQC(fastq_samples)
-            fastqc_zip = FASTQC.out.zip
-            crams_from_fastq = BWA_MEM2_ALIGN(fastq_samples, ref_mutect, bwa_idx_ch, fai_ch).out.cram_crai
-        } else {
-            crams_from_fastq = Channel.empty()
-        }
-
-        crams_from_cram = cram_samples.isEmpty() ? Channel.empty() : VALIDATE_CRAM(cram_samples, ref_mutect).out.cram_crai
+        FASTQC(fastq_samples)
+        fastqc_zip = FASTQC.out.zip
+        BWA_MEM2_ALIGN(fastq_samples, reference_ch, bwa_idx_ch, fai_ch)
+        crams_from_fastq = BWA_MEM2_ALIGN.out.cram_crai
+        VALIDATE_CRAM(cram_samples, reference_ch)
+        crams_from_cram = VALIDATE_CRAM.out.cram_crai
         crams_valid = crams_from_fastq.mix(crams_from_cram)
 
     } else if (params.crams) {
@@ -779,7 +924,8 @@ workflow {
             def meta = [id: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), sample: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), subject: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), type: 'tumor']
             [meta, cram]
         }
-        crams_valid = VALIDATE_CRAM(crams_in, ref_mutect).out.cram_crai
+        VALIDATE_CRAM(crams_in, reference_ch)
+        crams_valid = VALIDATE_CRAM.out.cram_crai
     } else {
         reads_ch = Channel.fromFilePairs(params.reads, flat: true, checkIfExists: true).map { sample, reads ->
             def meta = [id: sample, sample: sample, subject: sample, type: sample == params.normal_sample ? 'normal' : 'tumor']
@@ -787,43 +933,54 @@ workflow {
         }
         FASTQC(reads_ch)
         fastqc_zip = FASTQC.out.zip
-        crams_valid = BWA_MEM2_ALIGN(reads_ch, ref_mutect, bwa_idx_ch, fai_ch).out.cram_crai
+        BWA_MEM2_ALIGN(reads_ch, reference_ch, bwa_idx_ch, fai_ch)
+        crams_valid = BWA_MEM2_ALIGN.out.cram_crai
     }
 
-    // Preprocess
-    md = GATK_MARKDUPLICATES(crams_valid, ref_mutect)
-    bqsr = GATK_BASERECALIBRATOR(md.out.cram_crai, ref_mutect, ks_bqsr)
-    recals = GATK_APPLYBQSR(md.out.cram_crai, bqsr.out.table, ref_mutect)
-    final_crams = recals.out.cram_crai
+    // Preprocess: duplicate marking is already done during alignment.
+    if (params.run_bqsr) {
+        GATK_BASERECALIBRATOR(crams_valid, reference_ch, known_sites_ch)
+        bqsr_table = GATK_BASERECALIBRATOR.out.table
+        GATK_APPLYBQSR(crams_valid, bqsr_table, reference_ch)
+        final_crams = GATK_APPLYBQSR.out.cram_crai
+    } else {
+        final_crams = crams_valid
+    }
 
     // Pairing
-    Channel subject_pairs
+    subject_pairs = null
     if (params.sample_sheet) {
-        grouped = final_crams.groupBy { meta, cram, crai -> meta.subject }
-        subject_pairs = grouped.map { subject, items ->
-            def tumor = items.find { it[0].type == 'tumor' }
-            if (!tumor) return null
-            def normal = items.find { it[0].type == 'normal' }
-            [subject, tumor, normal]
+        grouped = final_crams
+            .map { meta, cram, crai -> [meta.subject, meta, cram, crai] }
+            .groupTuple()
+        subject_pairs = grouped.map { subject, metas, crams, crais ->
+            def tuples = (0..<metas.size()).collect { i -> [metas[i], crams[i], crais[i]] }
+            def tumor = tuples.find { it[0].type == 'tumor' }
+            def normal = tuples.find { it[0].type == 'normal' }
+            tumor ? [subject, tumor, normal] : null
         }.filter { it != null }
     } else {
         tumor_cram = final_crams.filter { meta, cram, crai -> meta.sample == params.tumor_sample }
         normal_cram = final_crams.filter { meta, cram, crai -> params.normal_sample ? meta.sample == params.normal_sample : false }
-        subject_pairs = tumor_cram.map { t -> [t[0].sample, t, null] }
-        if (!normal_cram.isEmpty()) {
-            subject_pairs = subject_pairs
-                .combine(normal_cram.first()) { pair, n -> [pair[0], pair[1], n] }
+        if (params.normal_sample) {
+            subject_pairs = tumor_cram
+                .combine(normal_cram.first()) { t, n -> [t[0].sample, t, n] }
+        } else {
+            subject_pairs = tumor_cram.map { t -> [t[0].sample, t, null] }
         }
     }
 
     paired_pairs = subject_pairs.filter { subject, tumor, normal -> normal != null }
     tumor_only_pairs = subject_pairs.filter { subject, tumor, normal -> normal == null }
 
-    paired_pairs.into { pairs_for_mutect; pairs_for_contam }
-    tumor_only_pairs.into { to_for_mutect; to_for_contam }
+    pairs_for_mutect = paired_pairs
+    pairs_for_contam = paired_pairs
+    to_for_mutect = tumor_only_pairs
+    to_for_contam = tumor_only_pairs
 
     // Split intervals
-    intervals = GATK_SPLITINTERVALS(ref_split, dict_ch, intervals_seed_main, params.scatter_count).out.intervals
+    GATK_SPLITINTERVALS(reference_ch, dict_ch, intervals_seed_main, params.scatter_count)
+    intervals = GATK_SPLITINTERVALS.out.intervals
 
     // Panel of normals
     pon_ch = Channel.empty()
@@ -832,28 +989,35 @@ workflow {
             def meta = [id: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), sample: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, '')]
             [meta, cram]
         }
-        pon_valid = VALIDATE_CRAM(pon_inputs, ref_pon).out.cram_crai
-        pon_md = GATK_MARKDUPLICATES(pon_valid, ref_pon)
-        pon_bqsr = GATK_BASERECALIBRATOR(pon_md.out.cram_crai, ref_pon, ks_pon)
-        pon_recals = GATK_APPLYBQSR(pon_md.out.cram_crai, pon_bqsr.out.table, ref_pon)
+        VALIDATE_CRAM(pon_inputs, reference_ch)
+        pon_valid = VALIDATE_CRAM.out.cram_crai
+        if (params.run_bqsr) {
+            GATK_BASERECALIBRATOR(pon_valid, reference_ch, known_sites_ch)
+            pon_bqsr_table = GATK_BASERECALIBRATOR.out.table
+            GATK_APPLYBQSR(pon_valid, pon_bqsr_table, reference_ch)
+            pon_prepped = GATK_APPLYBQSR.out.cram_crai
+        } else {
+            pon_prepped = pon_valid
+        }
 
-        pon_intervals = GATK_SPLITINTERVALS(ref_split, dict_ch, intervals_seed_pon, params.scatter_count).out.intervals
-        pon_shards = pon_intervals.cross(pon_recals.out.cram_crai).map { interval, tupleVal ->
+        GATK_SPLITINTERVALS(reference_ch, dict_ch, intervals_seed_pon, params.scatter_count)
+        pon_intervals = GATK_SPLITINTERVALS.out.intervals
+        pon_shards = pon_intervals.cross(pon_prepped).map { interval, tupleVal ->
             def (meta, cram, crai) = tupleVal
             [interval, meta, cram, crai]
         }
-        GATK_MUTECT2_NORMAL(pon_shards, ref_pon)
+        GATK_MUTECT2_NORMAL(pon_shards, reference_ch)
         pon_grouped = GATK_MUTECT2_NORMAL.out.vcf.groupTuple()
-        GATK_MERGE_PON_NORMAL(pon_grouped, ref_pon)
+        GATK_MERGE_PON_NORMAL(pon_grouped, reference_ch)
         pon_final = GATK_MERGE_PON_NORMAL.out.vcf.collect()
         GATK_CREATE_SOMATIC_PON(pon_final)
         pon_ch = GATK_CREATE_SOMATIC_PON.out.pon
     } else if (params.panel_of_normals) {
-        pon_ch = Channel.fromPath(params.panel_of_normals, checkIfExists: true).first()
+        pon_ch = Channel.fromPath(params.panel_of_normals, checkIfExists: true)
     }
 
     // Scatter Mutect2 across intervals
-    pon_ready = pon_ch.ifEmpty { Channel.value(null) }
+    pon_ready = pon_ch.ifEmpty(null)
 
     paired_scatter = intervals.cross(pairs_for_mutect).map { interval, triple ->
         def (subject, t, n) = triple
@@ -867,21 +1031,23 @@ workflow {
         [interval, t_meta, t_cram, t_crai]
     }
 
-    mutect_paired = GATK_MUTECT2_SCATTER(paired_scatter, ref_mutect, pon_ready)
-    mutect_tonly  = GATK_MUTECT2_SCATTER_TONLY(to_scatter, ref_mutect, pon_ready)
+    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, pon_ready)
+    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch, pon_ready)
 
     vcf_shards = Channel.empty()
-        .mix(mutect_paired.out.vcf)
-        .mix(mutect_tonly.out.vcf)
+        .mix(GATK_MUTECT2_SCATTER.out.vcf)
+        .mix(GATK_MUTECT2_SCATTER_TONLY.out.vcf)
     f1r2_shards = Channel.empty()
-        .mix(mutect_paired.out.f1r2)
-        .mix(mutect_tonly.out.f1r2)
+        .mix(GATK_MUTECT2_SCATTER.out.f1r2)
+        .mix(GATK_MUTECT2_SCATTER_TONLY.out.f1r2)
 
     vcf_group = vcf_shards.groupTuple()
-    merged_vcf = GATK_MERGEVCFS(vcf_group, ref_merge)
+    GATK_MERGEVCFS(vcf_group, reference_ch)
+    merged_vcf = GATK_MERGEVCFS.out.vcf
 
     f1r2_group = f1r2_shards.groupTuple()
-    lrom = GATK_LEARNREADORIENTATIONMODEL(f1r2_group)
+    GATK_LEARNREADORIENTATIONMODEL(f1r2_group)
+    lrom = GATK_LEARNREADORIENTATIONMODEL.out.model
 
     // Contamination
     contam_inputs_paired = pairs_for_contam.map { subject, t, n ->
@@ -894,34 +1060,34 @@ workflow {
         [t_meta, t_cram, t_crai]
     }
 
-    contam_paired = GATK_CONTAMINATION(contam_inputs_paired, ks_contam_paired)
-    contam_tonly  = GATK_CONTAMINATION_TONLY(contam_inputs_tonly, ks_contam_tonly)
+    GATK_CONTAMINATION(contam_inputs_paired, known_sites_ch)
+    GATK_CONTAMINATION_TONLY(contam_inputs_tonly, known_sites_ch)
     contam = Channel.empty()
-        .mix(contam_paired.out.contamination)
-        .mix(contam_tonly.out.contamination)
+        .mix(GATK_CONTAMINATION.out.contamination)
+        .mix(GATK_CONTAMINATION_TONLY.out.contamination)
     contam_segments = Channel.empty()
-        .mix(contam_paired.out.segments)
-        .mix(contam_tonly.out.segments)
+        .mix(GATK_CONTAMINATION.out.segments)
+        .mix(GATK_CONTAMINATION_TONLY.out.segments)
 
     // Align channels by sample for filtering
-    vcf_k       = merged_vcf.out.vcf.map { meta, vcf, tbi -> [meta.id, meta, vcf, tbi] }
+    vcf_k       = merged_vcf.map { meta, vcf, tbi -> [meta.id, meta, vcf, tbi] }
     contam_k    = contam.map { meta, table -> [meta.id, table] }
     segments_k  = contam_segments.map { meta, seg -> [meta.id, seg] }
-    lrom_k      = lrom.out.model.map { meta, model -> [meta.id, model] }
+    lrom_k      = lrom.map { meta, model -> [meta.id, model] }
 
-    vcf_contam = vcf_k.join(contam_k) { it[0] } { it[0] }
-        .map { key, v, c -> [key, v[1], v[2], v[3], c[1]] }
-    vcf_contam_seg = vcf_contam.join(segments_k) { it[0] } { it[0] }
-        .map { key, vc, s -> [key, vc[1], vc[2], vc[3], vc[4], s[1]] }
-    filter_input = vcf_contam_seg.join(lrom_k) { it[0] } { it[0] }
-        .map { key, vcs, m -> [vcs[1], vcs[2], vcs[3], vcs[4], m[1]] } // meta, vcf, tbi, contam, seg, model
+    vcf_contam = vcf_k.join(contam_k)
+        .map { key, meta, vcf, tbi, table -> [key, meta, vcf, tbi, table] }
+    vcf_contam_seg = vcf_contam.join(segments_k)
+        .map { key, meta, vcf, tbi, table, seg -> [key, meta, vcf, tbi, table, seg] }
+    filter_input = vcf_contam_seg.join(lrom_k)
+        .map { key, meta, vcf, tbi, table, seg, model -> [meta, vcf, tbi, table, seg, model] }
 
     GATK_FILTERMUTECTCALLS(
         filter_input,
-        ref_filter
+        reference_ch
     )
 
     // QC
-    qc_inputs = fastqc_zip.mix(md.out.metrics)
+    qc_inputs = fastqc_zip
     MULTIQC(qc_inputs)
 }
