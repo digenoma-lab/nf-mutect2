@@ -1,0 +1,6 @@
+subject,type,sample_id,fastq1,fastq2,cram
+S1,tumor,TUM1,,,data/TUM1.cram
+S1,normal,NOR1,,,data/NOR1.cram
+S2,tumor,TUM2,,,data/TUM2.cram
+S3,tumor,TUM3,data/TUM3_R1.fastq.gz,data/TUM3_R2.fastq.gz,
+S3,normal,NOR3,data/NOR3_R1.fastq.gz,data/NOR3_R2.fastq.gz,

@@ -7,7 +7,9 @@ Somatic SNV/indel calling with GATK Mutect2 for WGS (hg38), including optional P
 - Java 11+
 - Conda (default) or Singularity/Docker if you adapt `nextflow.config`
 - Reference: hg38 FASTA with .fai and .dict (created automatically)
+- FASTQ mode expects BWA-MEM2 reference index files next to the FASTA (`.0123`, `.amb`, `.ann`, `.bwt.2bit.64`, `.pac`)
 - Known sites VCF for contamination (and for BQSR when enabled) (e.g., gnomAD/common)
+- Germline resource VCF for Mutect2 (e.g., `af-only-gnomad.vcf.gz`)
 
 ## Sample sheet (preferred)
 CSV with header:
@@ -37,6 +39,7 @@ PAT2,tumor,TUMOR2,,,/crams/TUMOR2.cram
 nextflow run mutect2_pipeline.nf -profile slurm \
   --reference /refs/hg38.fa \
   --known_sites /refs/gnomad.vcf.gz \
+  --germline_resource /refs/af-only-gnomad.vcf.gz \
   --pon_crams "/normals/*.cram" \
   --scatter_count 50 \
   --outdir results/pon
@@ -45,6 +48,7 @@ nextflow run mutect2_pipeline.nf -profile slurm \
 nextflow run mutect2_pipeline.nf -profile slurm \
   --reference /refs/hg38.fa \
   --known_sites /refs/gnomad.vcf.gz \
+  --germline_resource /refs/af-only-gnomad.vcf.gz \
   --sample_sheet samples.csv \
   --panel_of_normals results/pon/panel_of_normals.vcf.gz \
   --run_bqsr false \
@@ -56,11 +60,16 @@ If you start from FASTQs, swap `--crams` for `--reads "data/*_{R1,R2}.fastq.gz"`
 
 ## Dry run (stub)
 ```bash
+# Run using stub fixtures committed in this repo
+tests/stub/run_stub.sh
+
+# Or run manually
 nextflow run mutect2_pipeline.nf -profile local,stub -stub-run \
-  --reference /refs/hg38.fa \
-  --known_sites /refs/gnomad.vcf.gz \
-  --sample_sheet samples.csv \
-  --outdir results/stub
+  --reference tests/stub/reference.fa \
+  --known_sites tests/stub/known_sites.vcf.gz \
+  --germline_resource tests/stub/known_sites.vcf.gz \
+  --sample_sheet tests/stub/samples.csv \
+  --outdir tests/stub/results
 ```
 If `nextflow` is not on `PATH`, use your local binary, for example:
 `/Users/adigenova/nextflow_pmd/nextflow run mutect2_pipeline.nf ...`
@@ -79,5 +88,6 @@ If `nextflow` is not on `PATH`, use your local binary, for example:
 - Duplicate marking is assumed to be done during alignment (no extra GATK MarkDuplicates pass).
 - BQSR is optional and disabled by default. Enable with `--run_bqsr true`.
 - Known sites are required for contamination estimation (and for BQSR when enabled).
+- `--germline_resource` is required for all Mutect2 calls.
 - Resource defaults live in `nextflow.config`; tune per cluster.
 - Tumor-only mode is supported when no normal exists for a subject in the sample sheet; contamination is computed tumor-only and Mutect2 runs without `-normal`.

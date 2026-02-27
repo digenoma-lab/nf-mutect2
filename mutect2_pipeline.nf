@@ -9,6 +9,7 @@ params.reads            = null          // Glob for paired FASTQs: "data/*_{R1,R
 params.crams            = null          // Glob for existing CRAMs/BAMs
 params.reference        = null          // hg38 FASTA
 params.known_sites      = null          // gnomAD/common VCF for BQSR & contamination
+params.germline_resource = null         // Mutect2 germline resource (e.g. af-only-gnomad.vcf.gz)
 params.intervals        = null          // BED or interval_list to seed SplitIntervals
 params.scatter_count    = 50            // WGS shard count
 params.interval_padding = 100
@@ -67,56 +68,6 @@ process SAMTOOLS_FAIDX {
     stub:
     """
     touch ${reference}.fai
-    """
-}
-
-process BWA_MEM2_INDEX {
-    tag "$reference.baseName"
-    publishDir "${params.outdir}/ref", mode: 'copy'
-
-    input:
-    path reference
-
-    output:
-    path "*.{0123,amb,ann,bwt.2bit.64,pac}", emit: index
-
-    script:
-    """
-    bwa-mem2 index ${reference}
-    """
-
-    stub:
-    """
-    touch ${reference}.0123 ${reference}.amb ${reference}.ann ${reference}.bwt.2bit.64 ${reference}.pac
-    """
-}
-
-process BWA_MEM2_ALIGN {
-    tag "$meta.id"
-    publishDir "${params.outdir}/align", mode: 'copy', pattern: "*.cram*"
-
-    input:
-    tuple val(meta), path(reads)
-    path reference
-    path index
-    path ref_fai
-
-    output:
-    tuple val(meta), path("${meta.id}.cram"), path("${meta.id}.cram.crai"), emit: cram_crai
-
-    script:
-    def rg = "@RG\\tID:${meta.id}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}"
-    """
-    bwa-mem2 mem -t ${task.cpus} -R "${rg}" ${reference} ${reads} | \\
-      samtools sort -@ ${task.cpus} --reference ${reference} -O BAM - | \\
-      samtools fixmate -m - - | \\
-      samtools sort -@ ${task.cpus} - | \\
-      samtools markdup -@ ${task.cpus} --write-index -O CRAM --reference ${reference} - ${meta.id}.cram
-    """
-
-    stub:
-    """
-    touch ${meta.id}.cram ${meta.id}.cram.crai
     """
 }
 
@@ -195,126 +146,61 @@ process FASTQC {
     """
 }
 
-//we do run bwa-mem2 or bwa mem
 process BWAMEM {
-
-    tag "$sampleId-mem"
-    //label 'process_high'
-    publishDir "$params.outdir/BWA", mode: "copy", pattern: '*.log.*'
-    publishDir "$params.outdir/BWA/HLA", mode: "copy", pattern: '*.hla.all'
+    tag "${meta.id}-${part}"
+    publishDir "${params.outdir}/align", mode: "copy", pattern: "*.mkdup.cram*"
 
     input:
-    tuple val(sampleId), val(part), file(read1), file(read2)
+    tuple val(meta), val(part), file(read1), file(read2)
+    path reference
 
     output:
-    tuple val("${sampleId}"), val("${part}"), file("${sampleId}-${part}.mkdup.cram"),file("${sampleId}-${part}.mkdup.cram.crai"), emit: bams
-    path("${sampleId}-${part}.log.bwamem")
-    path("${sampleId}-${part}.hla.all") , optional: true
-    path("${sampleId}-${part}.log.hla") , optional: true
+    tuple val(meta), val(part), path("${meta.id}-${part}.mkdup.cram"), path("${meta.id}-${part}.mkdup.cram.crai"), emit: bams
 
-   script:
-    def aln="bwa-mem2"
-    //we define the aln tool
-    if(params.aligner=="bwa"){
-    aln="bwa"
-    }
-    if(params.debug == true){
+    script:
+    def rg = "@RG\\tID:${meta.id}-${part}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}"
     """
-    echo "seqtk mergepe $read1 $read2 | ${aln} mem -p -t $task.cpus -R'@RG\\tID:${sampleId}-${part}\\tSM:${sampleId}\\tPL:ill' ${params.ref} - 2> ${sampleId}-${part}.log.bwamem | k8 ${params.alt_js} -p ${sampleId}-${part}.hla ${params.ref}.alt | samtools view -1 - > ${sampleId}-${part}.aln.bam"
-    echo "run-HLA ${sampleId}-${part}.hla > ${sampleId}-${part}.hla.top 2> ${sampleId}-${part}.log.hla;"
-    echo "touch ${sampleId}-${part}.hla.HLA-dummy.gt; cat ${sampleId}-${part}.hla.HLA*.gt | grep ^GT | cut -f2- > ${sampleId}-${part}.hla.all"
-    echo "rm -f ${sampleId}-${part}.hla.HLA*;"
-    touch ${sampleId}-${part}.mkdup.cram
-    touch ${sampleId}-${part}.mkdup.cram.crai
-    touch ${sampleId}-${part}.log.bwamem
-    touch ${sampleId}-${part}.hla.all
+    bwa-mem2 mem -t ${task.cpus} -R "${rg}" ${reference} ${read1} ${read2} | \\
+      samtools view -Sb - | \\
+      samtools fixmate -m - - | \\
+      samtools sort -@ ${task.cpus} - | \\
+      samtools markdup -@ ${task.cpus} --write-index -O CRAM --reference ${reference} - ${meta.id}-${part}.mkdup.cram
     """
-    }else{
-    if(params.hla == true){
+
+    stub:
     """
-    seqtk mergepe $read1 $read2 \\
-        | ${aln} mem -p -t $task.cpus -R'@RG\\tID:${sampleId}-${part}\\tSM:${sampleId}\\tPL:ill' ${params.ref} - 2> ${sampleId}-${part}.log.bwamem \\
-        | k8 ${params.alt_js} -p ${sampleId}-${part}.hla ${params.ref}.alt \
-        | samtools view -Sb -  \
-        | samtools fixmate -m - -  \
-        | samtools sort -m 1G -@ ${task.cpus - 8 } -  \
-        | samtools markdup -O CRAM  --write-index --reference ${params.ref} -@ ${task.cpus - 8} - ${sampleId}-${part}.mkdup.cram
-
-   run-HLA ${sampleId}-${part}.hla > ${sampleId}-${part}.hla.top 2> ${sampleId}-${part}.log.hla;
-     touch ${sampleId}-${part}.hla.HLA-dummy.gt; cat ${sampleId}-${part}.hla.HLA*.gt | grep ^GT | cut -f2- > ${sampleId}-${part}.hla.all;
-     rm -f ${sampleId}-${part}.hla.HLA*;
+    touch ${meta.id}-${part}.mkdup.cram ${meta.id}-${part}.mkdup.cram.crai
     """
-    }
-    else if (params.alt == true){
-     """
-    seqtk mergepe $read1 $read2  \\
-    | ${aln} mem -p -t $task.cpus  -R'@RG\\tID:${sampleId}-${part}\\tSM:${sampleId}\\tPL:ill' ${params.ref} - 2> ${sampleId}-${part}.log.bwamem \\
-    | k8 ${params.alt_js} -p ${sampleId}-${part}.hla hs38DH.fa.alt \
-    | samtools view -Sb -  \
-    | samtools fixmate -m - -  \
-    | samtools sort -m 1G -@ ${task.cpus - 8 } -  \
-    | samtools markdup -O CRAM  --write-index --reference ${params.ref} -@ ${task.cpus - 8} - ${sampleId}-${part}.mkdup.cram
-
-     """
-    }else{
-    //normal mapping mode
-     """
-      seqtk mergepe $read1 $read2 \\
-    | ${aln} mem -p -t $task.cpus  -R'@RG\\tID:${sampleId}-${part}\\tSM:${sampleId}\\tPL:ill' ${params.ref} - 2> ${sampleId}-${part}.log.bwamem \\
-    | samtools view -Sb -  \
-    | samtools fixmate -m - -  \
-    | samtools sort -@ ${task.cpus} -  \
-    | samtools markdup -O CRAM  --write-index --reference ${params.ref} -@ ${task.cpus} - ${sampleId}-${part}.mkdup.cram
-
-     """
-
-    }
-  }
-
 }
 
-//merge bams by sample
-process MERGEB{
+process MERGEB {
+    tag "${meta.id}-merge"
+    publishDir "${params.outdir}/align", mode: "copy", pattern: "*.cram*"
 
-  tag "$sampleId-merge"
-  publishDir "$params.outdir/CRAM", mode: "copy"
-  container "oras://community.wave.seqera.io/library/bwa-mem2_instrain_multiqc_qualimap_samtools:850f96dbd001458f"
+    input:
+    tuple val(meta), val(parts), path(cramFiles), path(craiFiles)
+    path reference
 
-  input:
-  tuple val(sampleId), val(parts), file(cramFiles), file(craiFiles)
-  path reference
+    output:
+    tuple val(meta), path("${meta.id}.cram"), path("${meta.id}.cram.crai"), emit: cram_crai
 
-  output:
-  tuple val(sampleId), file("${sampleId}.merged.cram"), file("${sampleId}.merged.cram.crai") ,emit: mbams
+    script:
+    def filesb = cramFiles instanceof List ? cramFiles : [cramFiles]
+    if (filesb.size() == 1) {
+        """
+        ln -s ${cramFiles[0]} ${meta.id}.cram
+        ln -s ${craiFiles[0]} ${meta.id}.cram.crai
+        """
+    } else {
+        """
+        samtools merge --write-index --reference ${reference} -O CRAM -@ ${task.cpus} -f ${meta.id}.cram ${cramFiles}
+        """
+    }
 
-  script:
-  def filesb = cramFiles instanceof List ? cramFiles : [cramFiles]
-  if ( filesb.size() == 1 ) {
-    if ( params.debug == true ) {
-                """
-                echo ln -s ${cramFiles[0]} ${sampleId}.merged.cram
-                touch ${sampleId}.merged.cram.crai
-                touch ${sampleId}.merged.cram
-                """
-            } else {
-                """
-                ln -s ${cramFiles[0]} ${sampleId}.merged.cram
-                ln -s ${craiFiles[0]} ${sampleId}.merged.cram.crai
-                """
-            }
-  }else{
-  if(params.debug == true){
-  """
-    echo samtools merge --write-index --reference  ${reference} -O CRAM -@ $task.cpus -f ${sampleId}.merged.cram ${cramFiles}
-    touch ${sampleId}.merged.cram
-    touch ${sampleId}.merged.cram.crai
-  """
-  }else{
-  """
-  samtools merge --write-index --reference ${reference} -O CRAM -@ $task.cpus -f ${sampleId}.merged.cram ${cramFiles}
-  """
-  }
- }
+    stub:
+    """
+    touch ${meta.id}.cram ${meta.id}.cram.crai
+    """
 }
 
 process QUALIMAP {
@@ -392,31 +278,30 @@ process VALIDATE_CRAM {
 
     stub:
     """
-    [ -f ${cram}.crai ] || touch ${cram}.crai
+    touch ${cram}.crai
     """
 }
 
-process GATK_MARKDUPLICATES {
+process VALIDATE_CRAM_PON {
     tag "$meta.id"
-    publishDir "${params.outdir}/align", mode: 'copy', pattern: "*_markdup.cram"
 
     input:
-    tuple val(meta), path(cram), path(crai)
+    tuple val(meta), path(cram)
     path reference
 
     output:
-    tuple val(meta), path("${meta.id}_markdup.cram"), path("${meta.id}_markdup.cram.crai"), emit: cram_crai
-    path("${meta.id}_markdup_metrics.txt"), emit: metrics
+    tuple val(meta), path(cram), path("${cram}.crai"), emit: cram_crai
 
     script:
     """
-    gatk MarkDuplicates \\
-      -I ${cram} \\
-      -O ${meta.id}_markdup.cram \\
-      -M ${meta.id}_markdup_metrics.txt \\
-      --CREATE_INDEX true \\
-      --VALIDATION_STRINGENCY LENIENT \\
-      --OPTICAL_DUPLICATE_PIXEL_DISTANCE 2500
+    [ -f ${cram}.crai ] || samtools index ${cram}
+    samtools quickcheck ${cram}
+    ln -s ${cram}.crai ${cram}.crai || true
+    """
+
+    stub:
+    """
+    touch ${cram}.crai
     """
 }
 
@@ -515,6 +400,7 @@ process GATK_MUTECT2_SCATTER {
     input:
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai), val(normal_meta), path(normal_cram), path(normal_crai)
     path reference
+    path germline_resource
     val pon
 
     output:
@@ -532,6 +418,7 @@ process GATK_MUTECT2_SCATTER {
       -tumor ${tumor_meta.sample} \\
       -normal ${normal_meta.sample} \\
       -L ${interval} \\
+      --germline-resource ${germline_resource} \\
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
@@ -553,6 +440,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
     input:
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai)
     path reference
+    path germline_resource
     val pon
 
     output:
@@ -568,6 +456,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
       -I ${tumor_cram} \\
       -tumor ${tumor_meta.sample} \\
       -L ${interval} \\
+      --germline-resource ${germline_resource} \\
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
@@ -787,6 +676,7 @@ process GATK_MUTECT2_NORMAL {
     input:
     tuple path(interval), val(meta), path(cram), path(crai)
     path reference
+    path germline_resource
 
     output:
     tuple val(meta), path("${meta.id}_${interval.baseName}_pon.vcf.gz"), emit: vcf
@@ -798,6 +688,7 @@ process GATK_MUTECT2_NORMAL {
       -I ${cram} \\
       -tumor ${meta.sample} \\
       -L ${interval} \\
+      --germline-resource ${germline_resource} \\
       --max-mnp-distance 0 \\
       -O ${meta.id}_${interval.baseName}_pon.vcf.gz
     """
@@ -864,35 +755,40 @@ workflow {
         error "Provide --sample_sheet (preferred) or --reads/--crams"
     if (!params.reference) error "Provide --reference (hg38 FASTA)"
     if (!params.known_sites) error "Provide --known_sites VCF for BQSR/contamination"
+    if (!params.germline_resource) error "Provide --germline_resource (e.g. af-only-gnomad.vcf.gz) for Mutect2"
     if (!params.sample_sheet && (!params.tumor_sample))
         error "Provide --tumor_sample (and --normal_sample if paired) when not using --sample_sheet"
 
-    reference_ch    = Channel.fromPath(params.reference, checkIfExists: true)
-    known_sites_ch  = Channel.fromPath(params.known_sites, checkIfExists: true)
+    reference_ch    = Channel.value(file(params.reference))
+    known_sites_ch  = Channel.value(file(params.known_sites))
+    germline_ch     = Channel.value(file(params.germline_resource))
 
     GATK_CREATE_DICT(reference_ch)
     dict_ch = GATK_CREATE_DICT.out.dict
     MAKE_CANONICAL_BED(dict_ch)
     canonical_bed = MAKE_CANONICAL_BED.out.bed
     SAMTOOLS_FAIDX(reference_ch)
-    fai_ch = SAMTOOLS_FAIDX.out.fai
-    BWA_MEM2_INDEX(reference_ch)
-    bwa_idx_ch = BWA_MEM2_INDEX.out.index
-    base_interval_seed = params.intervals ? Channel.fromPath(params.intervals, checkIfExists: true)
+    base_interval_seed = params.intervals ? Channel.value(file(params.intervals))
                                           : (params.canonical_only ? canonical_bed : Channel.empty())
     if (params.extra_intervals) {
-        extra_intervals_ch = Channel.fromPath(params.extra_intervals, checkIfExists: true)
+        extra_intervals_ch = Channel.value(file(params.extra_intervals))
         MERGE_INTERVALS(base_interval_seed, extra_intervals_ch)
         base_interval_seed = MERGE_INTERVALS.out.bed
     }
     intervals_seed_main = base_interval_seed
-    intervals_seed_pon = base_interval_seed
 
     // Input handling (sample sheet preferred)
     crams_valid = null
     fastqc_zip = Channel.empty()
 
     if (params.sample_sheet) {
+        sample_sheet_file = file(params.sample_sheet)
+        sample_sheet_dir = sample_sheet_file.parent
+        resolve_sheet_path = { p ->
+            if (!p) return null
+            return p.startsWith('/') ? file(p) : file(sample_sheet_dir.resolve(p).toString())
+        }
+
         sample_rows = Channel.fromPath(params.sample_sheet, checkIfExists: true)
             .splitCsv(header:true)
             .map { row ->
@@ -902,8 +798,8 @@ workflow {
                     subject: row.subject ?: row.sample_id ?: row.type,
                     type   : row.type?.toLowerCase()
                 ]
-                def fastqs = (row.fastq1 && row.fastq2) ? [row.fastq1, row.fastq2] : null
-                def cram = row.cram ?: null
+                def fastqs = (row.fastq1 && row.fastq2) ? [resolve_sheet_path.call(row.fastq1), resolve_sheet_path.call(row.fastq2)] : null
+                def cram = resolve_sheet_path.call(row.cram)
                 [meta, fastqs, cram]
             }
             .filter { meta, fastqs, cram -> meta.type in ['tumor','normal'] }
@@ -913,8 +809,14 @@ workflow {
 
         FASTQC(fastq_samples)
         fastqc_zip = FASTQC.out.zip
-        BWA_MEM2_ALIGN(fastq_samples, reference_ch, bwa_idx_ch, fai_ch)
-        crams_from_fastq = BWA_MEM2_ALIGN.out.cram_crai
+        bwamem_inputs = fastq_samples.map { meta, fastqs ->
+            def part = fastqs[0].baseName.replaceAll(/[^A-Za-z0-9._-]/, '_')
+            [meta, part, fastqs[0], fastqs[1]]
+        }
+        BWAMEM(bwamem_inputs, reference_ch)
+        merged_parts = BWAMEM.out.bams.groupTuple()
+        MERGEB(merged_parts, reference_ch)
+        crams_from_fastq = MERGEB.out.cram_crai
         VALIDATE_CRAM(cram_samples, reference_ch)
         crams_from_cram = VALIDATE_CRAM.out.cram_crai
         crams_valid = crams_from_fastq.mix(crams_from_cram)
@@ -927,14 +829,19 @@ workflow {
         VALIDATE_CRAM(crams_in, reference_ch)
         crams_valid = VALIDATE_CRAM.out.cram_crai
     } else {
-        reads_ch = Channel.fromFilePairs(params.reads, flat: true, checkIfExists: true).map { sample, reads ->
+        reads_ch = Channel.fromFilePairs(params.reads, checkIfExists: true).map { sample, reads ->
             def meta = [id: sample, sample: sample, subject: sample, type: sample == params.normal_sample ? 'normal' : 'tumor']
             [meta, reads]
         }
         FASTQC(reads_ch)
         fastqc_zip = FASTQC.out.zip
-        BWA_MEM2_ALIGN(reads_ch, reference_ch, bwa_idx_ch, fai_ch)
-        crams_valid = BWA_MEM2_ALIGN.out.cram_crai
+        bwamem_inputs = reads_ch.map { meta, reads ->
+            [meta, 'part1', reads[0], reads[1]]
+        }
+        BWAMEM(bwamem_inputs, reference_ch)
+        merged_parts = BWAMEM.out.bams.groupTuple()
+        MERGEB(merged_parts, reference_ch)
+        crams_valid = MERGEB.out.cram_crai
     }
 
     // Preprocess: duplicate marking is already done during alignment.
@@ -970,17 +877,17 @@ workflow {
         }
     }
 
-    paired_pairs = subject_pairs.filter { subject, tumor, normal -> normal != null }
-    tumor_only_pairs = subject_pairs.filter { subject, tumor, normal -> normal == null }
+    pairs_for_mutect = subject_pairs.filter { rec -> rec[2] != null }
+    to_for_mutect = subject_pairs.filter { rec -> rec[2] == null }
 
-    pairs_for_mutect = paired_pairs
-    pairs_for_contam = paired_pairs
-    to_for_mutect = tumor_only_pairs
-    to_for_contam = tumor_only_pairs
 
     // Split intervals
     GATK_SPLITINTERVALS(reference_ch, dict_ch, intervals_seed_main, params.scatter_count)
     intervals = GATK_SPLITINTERVALS.out.intervals
+    intervals_all = intervals.collect()
+    intervals_for_paired = intervals_all.flatMap { it }
+    intervals_for_tonly = intervals_all.flatMap { it }
+
 
     // Panel of normals
     pon_ch = Channel.empty()
@@ -989,50 +896,38 @@ workflow {
             def meta = [id: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), sample: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, '')]
             [meta, cram]
         }
-        VALIDATE_CRAM(pon_inputs, reference_ch)
-        pon_valid = VALIDATE_CRAM.out.cram_crai
-        if (params.run_bqsr) {
-            GATK_BASERECALIBRATOR(pon_valid, reference_ch, known_sites_ch)
-            pon_bqsr_table = GATK_BASERECALIBRATOR.out.table
-            GATK_APPLYBQSR(pon_valid, pon_bqsr_table, reference_ch)
-            pon_prepped = GATK_APPLYBQSR.out.cram_crai
-        } else {
-            pon_prepped = pon_valid
-        }
-
-        GATK_SPLITINTERVALS(reference_ch, dict_ch, intervals_seed_pon, params.scatter_count)
-        pon_intervals = GATK_SPLITINTERVALS.out.intervals
-        pon_shards = pon_intervals.cross(pon_prepped).map { interval, tupleVal ->
-            def (meta, cram, crai) = tupleVal
-            [interval, meta, cram, crai]
-        }
-        GATK_MUTECT2_NORMAL(pon_shards, reference_ch)
+        VALIDATE_CRAM_PON(pon_inputs, reference_ch)
+        pon_valid = VALIDATE_CRAM_PON.out.cram_crai
+        // Keep PON path independent from primary BQSR/splitting invocations to avoid process re-use conflicts.
+        pon_prepped = pon_valid
+        pon_intervals = intervals_all.flatMap { it }
+        pon_shards = pon_intervals.combine(pon_prepped)
+        GATK_MUTECT2_NORMAL(pon_shards, reference_ch, germline_ch)
         pon_grouped = GATK_MUTECT2_NORMAL.out.vcf.groupTuple()
         GATK_MERGE_PON_NORMAL(pon_grouped, reference_ch)
-        pon_final = GATK_MERGE_PON_NORMAL.out.vcf.collect()
+        pon_final = GATK_MERGE_PON_NORMAL.out.vcf.map { meta, vcf -> vcf }.collect()
         GATK_CREATE_SOMATIC_PON(pon_final)
         pon_ch = GATK_CREATE_SOMATIC_PON.out.pon
     } else if (params.panel_of_normals) {
-        pon_ch = Channel.fromPath(params.panel_of_normals, checkIfExists: true)
+        pon_ch = Channel.value(file(params.panel_of_normals))
     }
 
     // Scatter Mutect2 across intervals
     pon_ready = pon_ch.ifEmpty(null)
 
-    paired_scatter = intervals.cross(pairs_for_mutect).map { interval, triple ->
-        def (subject, t, n) = triple
+    paired_scatter = intervals_for_paired.combine(pairs_for_mutect).map { interval, subject, t, n ->
         def (t_meta, t_cram, t_crai) = t
         def (n_meta, n_cram, n_crai) = n
-        [interval, t_meta, t_cram, t_crai, n_meta, n_cram, n_crai]
+        [interval, t_meta, file(t_cram.toString()), file(t_crai.toString()), n_meta, file(n_cram.toString()), file(n_crai.toString())]
     }
-    to_scatter = intervals.cross(to_for_mutect).map { interval, triple ->
-        def (subject, t, _) = triple
+    to_scatter = intervals_for_tonly.combine(to_for_mutect).map { interval, subject, t, _ ->
         def (t_meta, t_cram, t_crai) = t
-        [interval, t_meta, t_cram, t_crai]
+        [interval, t_meta, file(t_cram.toString()), file(t_crai.toString())]
     }
 
-    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, pon_ready)
-    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch, pon_ready)
+
+    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, germline_ch, pon_ready)
+    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch, germline_ch, pon_ready)
 
     vcf_shards = Channel.empty()
         .mix(GATK_MUTECT2_SCATTER.out.vcf)
@@ -1041,7 +936,9 @@ workflow {
         .mix(GATK_MUTECT2_SCATTER.out.f1r2)
         .mix(GATK_MUTECT2_SCATTER_TONLY.out.f1r2)
 
-    vcf_group = vcf_shards.groupTuple()
+    vcf_group = vcf_shards
+        .map { meta, vcf, tbi -> [meta, vcf] }
+        .groupTuple()
     GATK_MERGEVCFS(vcf_group, reference_ch)
     merged_vcf = GATK_MERGEVCFS.out.vcf
 
@@ -1050,15 +947,14 @@ workflow {
     lrom = GATK_LEARNREADORIENTATIONMODEL.out.model
 
     // Contamination
-    contam_inputs_paired = pairs_for_contam.map { subject, t, n ->
-        def (t_meta, t_cram, t_crai) = t
-        def (n_meta, n_cram, n_crai) = n
-        [t_meta, t_cram, t_crai, n_meta, n_cram, n_crai]
-    }
-    contam_inputs_tonly = to_for_contam.map { subject, t, _ ->
-        def (t_meta, t_cram, t_crai) = t
-        [t_meta, t_cram, t_crai]
-    }
+    contam_inputs_paired = paired_scatter
+        .map { interval, t_meta, t_cram, t_crai, n_meta, n_cram, n_crai ->
+            [t_meta, t_cram, t_crai, n_meta, n_cram, n_crai]
+        }
+        .unique { row -> row[0].id }
+    contam_inputs_tonly = to_scatter
+        .map { interval, t_meta, t_cram, t_crai -> [t_meta, t_cram, t_crai] }
+        .unique { row -> row[0].id }
 
     GATK_CONTAMINATION(contam_inputs_paired, known_sites_ch)
     GATK_CONTAMINATION_TONLY(contam_inputs_tonly, known_sites_ch)
@@ -1088,6 +984,6 @@ workflow {
     )
 
     // QC
-    qc_inputs = fastqc_zip
+    qc_inputs = fastqc_zip.map { meta, zip -> zip }
     MULTIQC(qc_inputs)
 }
