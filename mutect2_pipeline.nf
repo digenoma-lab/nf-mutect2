@@ -34,22 +34,24 @@ params.alt_js="bwa-postalt.js"
 
 process GATK_CREATE_DICT {
     tag "$reference.baseName"
-    publishDir "${params.outdir}/ref", mode: 'copy', saveAs: { "genome.dict" }
+    publishDir "${params.outdir}/ref", mode: 'copy'
 
     input:
     path reference
 
     output:
-    path "*.dict", emit: dict
+    path "${reference.baseName}.dict", emit: dict
 
     script:
+    def dict_name = "${reference.baseName}.dict"
     """
-    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CreateSequenceDictionary -R ${reference} -O genome.dict
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CreateSequenceDictionary -R ${reference} -O ${dict_name}
     """
 
     stub:
+    def dict_name = "${reference.baseName}.dict"
     """
-    touch genome.dict
+    touch ${dict_name}
     """
 }
 
@@ -414,6 +416,10 @@ process GATK_SPLITINTERVALS {
     script:
     def baseArg = base_intervals ? "-L ${base_intervals}" : ""
     """
+    ref_name=\$(basename "${reference}")
+    ref_root="\${ref_name%.*}"
+    ln -sf "${dict}" "\${ref_root}.dict"
+    ln -sf "${ref_fai}" "\${ref_name}.fai"
     mkdir -p intervals
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" SplitIntervals \\
       -R ${reference} \\
@@ -799,7 +805,6 @@ workflow {
         error "Provide --tumor_sample (and --normal_sample if paired) when not using --sample_sheet"
 
     reference_ch    = Channel.value(file(params.reference))
-    reference_fai    = Channel.value(file(params.reference+".fai"))
     known_sites_ch  = Channel.value(file(params.known_sites))
     germline_ch     = Channel.value(file(params.germline_resource))
     resolve_aln_index = { aln ->
@@ -824,6 +829,7 @@ workflow {
     MAKE_CANONICAL_BED(dict_ch)
     canonical_bed = MAKE_CANONICAL_BED.out.bed
     SAMTOOLS_FAIDX(reference_ch)
+    reference_fai = SAMTOOLS_FAIDX.out.fai
     base_interval_seed = params.intervals ? Channel.value(file(params.intervals))
                                           : (params.canonical_only ? canonical_bed : Channel.empty())
     if (params.extra_intervals) {
