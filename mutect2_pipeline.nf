@@ -24,6 +24,9 @@ params.canonical_only   = true          // default restrict to autosomes + sex c
 params.extra_intervals  = null          // BED/interval_list to add non-canonical contigs
 params.run_bqsr         = false         // optional BQSR; disabled by default
 params.debug            = false
+//we declare bwa variables
+params.aligner="bwa-mem2"
+params.alt_js="bwa-postalt.js"
 
 // ------------------------------------------------------------------
 // Processes
@@ -146,6 +149,9 @@ process FASTQC {
     """
 }
 
+
+
+
 process BWAMEM {
     tag "${meta.id}-${part}"
     publishDir "${params.outdir}/align", mode: "copy", pattern: "*.mkdup.cram*"
@@ -159,12 +165,29 @@ process BWAMEM {
 
     script:
     def rg = "@RG\\tID:${meta.id}-${part}\\tSM:${meta.sample}\\tPL:ILLUMINA\\tLB:${meta.sample}"
+    def aln="bwa-mem2"
+    //we define the aln tool
+    if(params.aligner=="bwa"){
+    aln="bwa"
+    }
     """
-    bwa-mem2 mem -t ${task.cpus} -R "${rg}" ${reference} ${read1} ${read2} | \\
-      samtools view -Sb - | \\
-      samtools fixmate -m - - | \\
-      samtools sort -@ ${task.cpus} - | \\
-      samtools markdup -@ ${task.cpus} --write-index -O CRAM --reference ${reference} - ${meta.id}-${part}.mkdup.cram
+   ## bwa-mem2 mem -t ${task.cpus} -R "${rg}" ${reference} ${read1} ${read2} | \\
+    #  samtools view -Sb - | \\
+    #  samtools fixmate -m - - | \\
+    #  samtools sort -@ ${task.cpus} - | \\
+    #  samtools markdup -@ ${task.cpus} --write-index -O CRAM --reference ${reference} - ${meta.id}-${part}.mkdup.cram
+    
+    seqtk mergepe $read1 $read2 \\
+        | ${aln} mem -p -t $task.cpus -R "${rg}" ${reference} - 2> ${meta.id}-${part}.log.bwamem \\
+        | k8 ${params.alt_js} -p ${meta.id}-${part}.hla ${reference}.alt \
+        | samtools view -Sb -  \
+        | samtools fixmate -m - -  \
+        | samtools sort -m 1G -@ ${task.cpus - 8 } -  \
+        | samtools markdup -O CRAM  --write-index --reference ${reference} -@ ${task.cpus - 8} - ${meta.id}-${part}.mkdup.cram
+
+   run-HLA ${meta.id}-${part}.hla > ${meta.id}-${part}.hla.top 2> ${meta.id}-${part}.log.hla;
+     touch ${meta.id}-${part}.hla.HLA-dummy.gt; cat ${meta.id}-${part}.hla.HLA*.gt | grep ^GT | cut -f2- > ${meta.id}-${part}.hla.all;
+     rm -f ${meta.id}-${part}.hla.HLA*;
     """
 
     stub:
@@ -172,6 +195,9 @@ process BWAMEM {
     touch ${meta.id}-${part}.mkdup.cram ${meta.id}-${part}.mkdup.cram.crai
     """
 }
+
+
+
 
 process MERGEB {
     tag "${meta.id}-merge"
@@ -892,10 +918,19 @@ workflow {
     // Panel of normals
     pon_ch = Channel.empty()
     if (!params.panel_of_normals && params.pon_crams) {
-        pon_inputs = Channel.fromPath(params.pon_crams, checkIfExists: true).map { cram ->
+        pon_from_param = Channel.fromPath(params.pon_crams, checkIfExists: true).map { cram ->
             def meta = [id: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), sample: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, '')]
             [meta, cram]
         }
+        pon_from_final = subject_pairs
+            .filter { rec -> rec[2] != null }
+            .map { subject, t, n ->
+                def (n_meta, n_cram, n_crai) = n
+                [n_meta, n_cram]
+            }
+        pon_inputs = pon_from_param
+            .mix(pon_from_final)
+            .unique { row -> row[0].id }
         VALIDATE_CRAM_PON(pon_inputs, reference_ch)
         pon_valid = VALIDATE_CRAM_PON.out.cram_crai
         // Keep PON path independent from primary BQSR/splitting invocations to avoid process re-use conflicts.
