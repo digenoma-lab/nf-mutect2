@@ -445,6 +445,7 @@ process GATK_MUTECT2_SCATTER {
     input:
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai), val(normal_meta), path(normal_cram), path(normal_crai)
     path reference
+    path ref_fai
     path germline_resource
     val pon
 
@@ -485,6 +486,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
     input:
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai)
     path reference
+    path ref_fai
     path germline_resource
     val pon
 
@@ -999,8 +1001,8 @@ workflow {
     }
 
 
-    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, germline_ch, pon_ready)
-    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch, germline_ch, pon_ready)
+    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, reference_fai,  germline_ch, pon_ready)
+    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch,reference_fai, germline_ch, pon_ready)
 
     vcf_shards = Channel.empty()
         .mix(GATK_MUTECT2_SCATTER.out.vcf)
