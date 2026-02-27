@@ -289,8 +289,8 @@ process VALIDATE_CRAM {
     tag "$meta.id"
 
     input:
-    tuple val(meta), path(cram), path(crai)
-    path reference
+    tuple val(meta), path(cram, stageAs: 'aln/*'), path(crai, stageAs: 'idx/*')
+    path reference, stageAs: 'ref/*'
 
     output:
     tuple val(meta), path(cram), path(crai), emit: cram_crai
@@ -318,8 +318,8 @@ process VALIDATE_CRAM_PON {
     tag "$meta.id"
 
     input:
-    tuple val(meta), path(cram), path(crai)
-    path reference
+    tuple val(meta), path(cram, stageAs: 'aln/*'), path(crai, stageAs: 'idx/*')
+    path reference, stageAs: 'ref/*'
 
     output:
     tuple val(meta), path(cram), path(crai), emit: cram_crai
