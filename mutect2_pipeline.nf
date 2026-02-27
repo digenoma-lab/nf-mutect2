@@ -810,7 +810,7 @@ workflow {
         if (p.endsWith('.bam')) {
             def bamBai = file("${p}.bai")
             if (bamBai.exists()) return bamBai
-            def bai = file(p.replaceAll(/\\.bam$/, '.bai'))
+            def bai = file(p.replaceAll(/\.bam$/, '.bai'))
             if (bai.exists()) return bai
             error "Missing BAM index (.bai) for ${p}"
         }
@@ -873,7 +873,6 @@ workflow {
         merged_parts = BWAMEM.out.bams.groupTuple()
         MERGEB(merged_parts, reference_ch)
         crams_from_fastq = MERGEB.out.cram_crai
-        cram_samples.view()
         VALIDATE_CRAM(cram_samples, reference_ch)
         crams_from_cram = VALIDATE_CRAM.out.cram_crai
         crams_valid = crams_from_fastq.mix(crams_from_cram)
