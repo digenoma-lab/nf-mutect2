@@ -525,7 +525,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
 
 process GATK_MERGEVCFS {
     tag "$meta.id"
-    publishDir "${params.outdir}/variants", mode: 'copy', pattern: "*_merged.vcf.gz"
+    publishDir "${params.outdir}/variants", mode: 'copy'
 
     input:
     tuple val(meta), path(vcf_list)
@@ -622,6 +622,8 @@ process GATK_FILTERMUTECTCALLS {
     input:
     tuple val(meta), path(vcf), path(tbi), path(contamination), path(segments), path(orientation_model)
     path reference
+    path ref_fai
+    path dict_ch
 
     output:
     tuple val(meta), path("${meta.id}_filtered.vcf.gz"), path("${meta.id}_filtered.vcf.gz.tbi"), emit: vcf
@@ -1065,7 +1067,9 @@ workflow {
 
     GATK_FILTERMUTECTCALLS(
         filter_input,
-        reference_ch
+        reference_ch,
+        reference_fai,
+        dict_ch
     )
 
     // QC
