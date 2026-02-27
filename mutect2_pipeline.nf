@@ -44,7 +44,7 @@ process GATK_CREATE_DICT {
 
     script:
     """
-    gatk CreateSequenceDictionary -R ${reference} -O genome.dict
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CreateSequenceDictionary -R ${reference} -O genome.dict
     """
 
     stub:
@@ -344,7 +344,7 @@ process GATK_BASERECALIBRATOR {
 
     script:
     """
-    gatk BaseRecalibrator \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" BaseRecalibrator \\
       -I ${cram} \\
       -R ${reference} \\
       --known-sites ${known_sites} \\
@@ -371,7 +371,7 @@ process GATK_APPLYBQSR {
 
     script:
     """
-    gatk ApplyBQSR \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" ApplyBQSR \\
       -I ${cram} \\
       -R ${reference} \\
       --bqsr-recal-file ${table} \\
@@ -402,7 +402,7 @@ process GATK_SPLITINTERVALS {
     def baseArg = base_intervals ? "-L ${base_intervals}" : ""
     """
     mkdir -p intervals
-    gatk SplitIntervals \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" SplitIntervals \\
       -R ${reference} \\
       ${baseArg} \\
       --sequence-dictionary ${dict} \\
@@ -437,7 +437,7 @@ process GATK_MUTECT2_SCATTER {
     script:
     def ponArg = pon ? "--panel-of-normals ${pon}" : ""
     """
-    gatk Mutect2 \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" Mutect2 \\
       -R ${reference} \\
       -I ${tumor_cram} \\
       -I ${normal_cram} \\
@@ -477,7 +477,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
     script:
     def ponArg = pon ? "--panel-of-normals ${pon}" : ""
     """
-    gatk Mutect2 \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" Mutect2 \\
       -R ${reference} \\
       -I ${tumor_cram} \\
       -tumor ${tumor_meta.sample} \\
@@ -511,11 +511,11 @@ process GATK_MERGEVCFS {
     script:
     def inputs = vcf_list.collect { "-I ${it}" }.join(" ")
     """
-    gatk MergeVcfs \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" MergeVcfs \\
       ${inputs} \\
       -R ${reference} \\
       -O ${meta.id}_merged.vcf.gz
-    gatk IndexFeatureFile -I ${meta.id}_merged.vcf.gz
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" IndexFeatureFile -I ${meta.id}_merged.vcf.gz
     """
 
     stub:
@@ -536,7 +536,7 @@ process GATK_LEARNREADORIENTATIONMODEL {
     script:
     def inputs = f1r2_list.collect { "-I ${it}" }.join(" ")
     """
-    gatk LearnReadOrientationModel \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" LearnReadOrientationModel \\
       ${inputs} \\
       -O ${meta.id}_read_orientation_model.tar.gz
     """
@@ -559,7 +559,7 @@ process GATK_GETPILEUPSUMMARIES {
 
     script:
     """
-    gatk GetPileupSummaries \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries \\
       -I ${cram} \\
       -V ${known_sites} \\
       -L ${known_sites} \\
@@ -581,7 +581,7 @@ process GATK_CALCULATECONTAMINATION {
     script:
     def matchedArg = normal_pileups ? "-matched ${normal_pileups}" : ""
     """
-    gatk CalculateContamination \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CalculateContamination \\
       -I ${tumor_pileups} \\
       ${matchedArg} \\
       -O ${tumor_meta.id}_contamination.table \\
@@ -603,7 +603,7 @@ process GATK_FILTERMUTECTCALLS {
 
     script:
     """
-    gatk FilterMutectCalls \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" FilterMutectCalls \\
       -R ${reference} \\
       -V ${vcf} \\
       --contamination-table ${contamination} \\
@@ -653,9 +653,9 @@ process GATK_CONTAMINATION {
 
     script:
     """
-    gatk GetPileupSummaries -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
-    gatk GetPileupSummaries -I ${normal_cram} -V ${known_sites} -L ${known_sites} -O normal_pileups.table
-    gatk CalculateContamination \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -I ${normal_cram} -V ${known_sites} -L ${known_sites} -O normal_pileups.table
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CalculateContamination \\
       -I tumor_pileups.table \\
       -matched normal_pileups.table \\
       -O ${tumor_meta.id}_contamination.table \\
@@ -681,8 +681,8 @@ process GATK_CONTAMINATION_TONLY {
 
     script:
     """
-    gatk GetPileupSummaries -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
-    gatk CalculateContamination \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CalculateContamination \\
       -I tumor_pileups.table \\
       -O ${tumor_meta.id}_contamination.table \\
       --tumor-segmentation ${tumor_meta.id}_segments.table
@@ -709,7 +709,7 @@ process GATK_MUTECT2_NORMAL {
 
     script:
     """
-    gatk Mutect2 \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" Mutect2 \\
       -R ${reference} \\
       -I ${cram} \\
       -tumor ${meta.sample} \\
@@ -739,8 +739,8 @@ process GATK_MERGE_PON_NORMAL {
     script:
     def inputs = vcf_list.collect { "-I ${it}" }.join(" ")
     """
-    gatk MergeVcfs ${inputs} -R ${reference} -O ${meta.id}_pon_merged.vcf.gz
-    gatk IndexFeatureFile -I ${meta.id}_pon_merged.vcf.gz
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" MergeVcfs ${inputs} -R ${reference} -O ${meta.id}_pon_merged.vcf.gz
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" IndexFeatureFile -I ${meta.id}_pon_merged.vcf.gz
     """
 
     stub:
@@ -761,7 +761,7 @@ process GATK_CREATE_SOMATIC_PON {
     script:
     def inputs = vcf_list.collect { "-vcfs ${it}" }.join(" ")
     """
-    gatk CreateSomaticPanelOfNormals \\
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CreateSomaticPanelOfNormals \\
       ${inputs} \\
       -O panel_of_normals.vcf.gz
     """
