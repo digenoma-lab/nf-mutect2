@@ -17,7 +17,7 @@ CSV with header:
 subject,type,sample_id,fastq1,fastq2,cram
 ```
 - `type`: `tumor` or `normal`
-- Supply either paired FASTQs (fastq1/fastq2) or a CRAM path per row.
+- Supply either paired FASTQs (fastq1/fastq2) or an aligned file path per row (`.cram` or `.bam` in the `cram` column).
 - Tumor-only is allowed: include a `tumor` row without a matching `normal` for the same `subject`.
 
 Example:
@@ -57,6 +57,7 @@ nextflow run mutect2_pipeline.nf -profile slurm \
 ```
 
 If you start from FASTQs, swap `--crams` for `--reads "data/*_{R1,R2}.fastq.gz"`.
+For aligned inputs, index files must already exist (`.cram.crai` for CRAM, `.bam.bai` or `.bai` for BAM); the pipeline validates and uses them as-is.
 
 ## Dry run (stub)
 ```bash

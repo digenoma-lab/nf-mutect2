@@ -6,7 +6,7 @@ nextflow.enable.dsl = 2
 // Parameters (WGS hg38 defaults; SLURM profile in nextflow.config)
 // ------------------------------------------------------------------
 params.reads            = null          // Glob for paired FASTQs: "data/*_{R1,R2}.fastq.gz"
-params.crams            = null          // Glob for existing CRAMs/BAMs
+params.crams            = null          // Glob for existing CRAM/BAM files
 params.reference        = null          // hg38 FASTA
 params.known_sites      = null          // gnomAD/common VCF for BQSR & contamination
 params.germline_resource = null         // Mutect2 germline resource (e.g. af-only-gnomad.vcf.gz)
@@ -19,7 +19,7 @@ params.normal_sample    = null
 params.panel_of_normals = null          // Pre-built PON VCF
 params.pon_crams        = null          // Glob of normal CRAMs to build PON
 params.wgs              = true
-params.sample_sheet     = null          // CSV with columns: subject,type,tumor_sample(optional),sample_id,fastq1,fastq2,cram
+params.sample_sheet     = null          // CSV with columns: subject,type,tumor_sample(optional),sample_id,fastq1,fastq2,cram (CRAM/BAM path in `cram`)
 params.canonical_only   = true          // default restrict to autosomes + sex chromosomes
 params.extra_intervals  = null          // BED/interval_list to add non-canonical contigs
 params.run_bqsr         = false         // optional BQSR; disabled by default
@@ -289,22 +289,28 @@ process VALIDATE_CRAM {
     tag "$meta.id"
 
     input:
-    tuple val(meta), path(cram)
+    tuple val(meta), path(cram), path(crai)
     path reference
 
     output:
-    tuple val(meta), path(cram), path("${cram}.crai"), emit: cram_crai
+    tuple val(meta), path(cram), path(crai), emit: cram_crai
 
     script:
     """
-    [ -f ${cram}.crai ] || samtools index ${cram}
+    if [[ "${cram}" == *.cram && "${crai}" != *.crai ]]; then
+      echo "ERROR: CRAM input ${cram} must use a .crai index, got ${crai}" >&2
+      exit 1
+    fi
+    if [[ "${cram}" == *.bam && "${crai}" != *.bai ]]; then
+      echo "ERROR: BAM input ${cram} must use a .bai index, got ${crai}" >&2
+      exit 1
+    fi
     samtools quickcheck ${cram}
-    ln -s ${cram}.crai ${cram}.crai || true
     """
 
     stub:
     """
-    touch ${cram}.crai
+    true
     """
 }
 
@@ -312,22 +318,28 @@ process VALIDATE_CRAM_PON {
     tag "$meta.id"
 
     input:
-    tuple val(meta), path(cram)
+    tuple val(meta), path(cram), path(crai)
     path reference
 
     output:
-    tuple val(meta), path(cram), path("${cram}.crai"), emit: cram_crai
+    tuple val(meta), path(cram), path(crai), emit: cram_crai
 
     script:
     """
-    [ -f ${cram}.crai ] || samtools index ${cram}
+    if [[ "${cram}" == *.cram && "${crai}" != *.crai ]]; then
+      echo "ERROR: CRAM input ${cram} must use a .crai index, got ${crai}" >&2
+      exit 1
+    fi
+    if [[ "${cram}" == *.bam && "${crai}" != *.bai ]]; then
+      echo "ERROR: BAM input ${cram} must use a .bai index, got ${crai}" >&2
+      exit 1
+    fi
     samtools quickcheck ${cram}
-    ln -s ${cram}.crai ${cram}.crai || true
     """
 
     stub:
     """
-    touch ${cram}.crai
+    true
     """
 }
 
@@ -788,6 +800,22 @@ workflow {
     reference_ch    = Channel.value(file(params.reference))
     known_sites_ch  = Channel.value(file(params.known_sites))
     germline_ch     = Channel.value(file(params.germline_resource))
+    resolve_aln_index = { aln ->
+        def p = aln.toString()
+        if (p.endsWith('.cram')) {
+            def idx = file("${p}.crai")
+            if (!idx.exists()) error "Missing CRAM index (.crai) for ${p}"
+            return idx
+        }
+        if (p.endsWith('.bam')) {
+            def bamBai = file("${p}.bai")
+            if (bamBai.exists()) return bamBai
+            def bai = file(p.replaceAll(/\\.bam$/, '.bai'))
+            if (bai.exists()) return bai
+            error "Missing BAM index (.bai) for ${p}"
+        }
+        error "Unsupported alignment extension for ${p}; expected .cram or .bam"
+    }
 
     GATK_CREATE_DICT(reference_ch)
     dict_ch = GATK_CREATE_DICT.out.dict
@@ -831,7 +859,9 @@ workflow {
             .filter { meta, fastqs, cram -> meta.type in ['tumor','normal'] }
 
         fastq_samples = sample_rows.filter { meta, fastqs, cram -> fastqs }.map { meta, fastqs, cram -> [meta, fastqs] }
-        cram_samples  = sample_rows.filter { meta, fastqs, cram -> cram }.map { meta, fastqs, cram -> [meta, cram] }
+        cram_samples  = sample_rows
+            .filter { meta, fastqs, cram -> cram }
+            .map { meta, fastqs, cram -> [meta, cram, resolve_aln_index.call(cram)] }
 
         FASTQC(fastq_samples)
         fastqc_zip = FASTQC.out.zip
@@ -850,7 +880,7 @@ workflow {
     } else if (params.crams) {
         crams_in = Channel.fromPath(params.crams, checkIfExists: true).map { cram ->
             def meta = [id: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), sample: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), subject: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), type: 'tumor']
-            [meta, cram]
+            [meta, cram, resolve_aln_index.call(cram)]
         }
         VALIDATE_CRAM(crams_in, reference_ch)
         crams_valid = VALIDATE_CRAM.out.cram_crai
@@ -920,13 +950,13 @@ workflow {
     if (!params.panel_of_normals && params.pon_crams) {
         pon_from_param = Channel.fromPath(params.pon_crams, checkIfExists: true).map { cram ->
             def meta = [id: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, ''), sample: cram.baseName.replaceAll(/\\.cram$|\\.bam$/, '')]
-            [meta, cram]
+            [meta, cram, resolve_aln_index.call(cram)]
         }
         pon_from_final = subject_pairs
             .filter { rec -> rec[2] != null }
             .map { subject, t, n ->
                 def (n_meta, n_cram, n_crai) = n
-                [n_meta, n_cram]
+                [n_meta, n_cram, n_crai]
             }
         pon_inputs = pon_from_param
             .mix(pon_from_final)
