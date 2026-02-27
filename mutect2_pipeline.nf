@@ -403,6 +403,7 @@ process GATK_SPLITINTERVALS {
 
     input:
     path reference
+    path ref_fai
     path dict
     path base_intervals
     val scatter_count
@@ -798,6 +799,7 @@ workflow {
         error "Provide --tumor_sample (and --normal_sample if paired) when not using --sample_sheet"
 
     reference_ch    = Channel.value(file(params.reference))
+    reference_fai    = Channel.value(file(params.reference+".fai"))
     known_sites_ch  = Channel.value(file(params.known_sites))
     germline_ch     = Channel.value(file(params.germline_resource))
     resolve_aln_index = { aln ->
@@ -938,7 +940,7 @@ workflow {
 
 
     // Split intervals
-    GATK_SPLITINTERVALS(reference_ch, dict_ch, intervals_seed_main, params.scatter_count)
+    GATK_SPLITINTERVALS(reference_ch,reference_fai, dict_ch, intervals_seed_main, params.scatter_count)
     intervals = GATK_SPLITINTERVALS.out.intervals
     intervals_all = intervals.collect()
     intervals_for_paired = intervals_all.flatMap { it }
