@@ -470,6 +470,7 @@ process GATK_MUTECT2_SCATTER {
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
+     mv ${tumor_meta.id}_${interval.baseName}.vcf.gz.stats ${tumor_meta.id}_${interval.baseName}.stats 
     """
 
     stub:
