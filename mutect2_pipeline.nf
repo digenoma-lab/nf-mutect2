@@ -416,10 +416,10 @@ process GATK_SPLITINTERVALS {
     script:
     def baseArg = base_intervals ? "-L ${base_intervals}" : ""
     """
-    ref_name=\$(basename "${reference}")
-    ref_root="\${ref_name%.*}"
-    ln -sf "${dict}" "\${ref_root}.dict"
-    ln -sf "${ref_fai}" "\${ref_name}.fai"
+    #ref_name=\$(basename "${reference}")
+    #ref_root="\${ref_name%.*}"
+    #ln -sf "${dict}" "\${ref_root}.dict"
+    #ln -sf "${ref_fai}" "\${ref_name}.fai"
     mkdir -p intervals
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" SplitIntervals \\
       -R ${reference} \\
