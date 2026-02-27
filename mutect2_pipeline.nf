@@ -454,7 +454,7 @@ process GATK_MUTECT2_SCATTER {
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}.vcf.gz"), path("${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi"), emit: vcf
     tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz"), emit: f1r2
-    path("${tumor_meta.id}_${interval.baseName}.stats"), emit: stats
+    tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}.vcf.gz.stats"), emit: stats
 
     script:
     def ponArg = pon ? "--panel-of-normals ${pon}" : ""
@@ -470,7 +470,6 @@ process GATK_MUTECT2_SCATTER {
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
-     mv ${tumor_meta.id}_${interval.baseName}.vcf.gz.stats ${tumor_meta.id}_${interval.baseName}.stats 
     """
 
     stub:
@@ -478,7 +477,7 @@ process GATK_MUTECT2_SCATTER {
     touch ${tumor_meta.id}_${interval.baseName}.vcf.gz
     touch ${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi
     touch ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz
-    touch ${tumor_meta.id}_${interval.baseName}.stats
+    touch ${tumor_meta.id}_${interval.baseName}.vcf.gz.stats
     """
 }
 
@@ -498,7 +497,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}.vcf.gz"), path("${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi"), emit: vcf
     tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz"), emit: f1r2
-    path("${tumor_meta.id}_${interval.baseName}.stats"), emit: stats
+    tuple val(tumor_meta), path("${tumor_meta.id}_${interval.baseName}.vcf.gz.stats"), emit: stats
 
     script:
     def ponArg = pon ? "--panel-of-normals ${pon}" : ""
@@ -519,7 +518,31 @@ process GATK_MUTECT2_SCATTER_TONLY {
     touch ${tumor_meta.id}_${interval.baseName}.vcf.gz
     touch ${tumor_meta.id}_${interval.baseName}.vcf.gz.tbi
     touch ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz
-    touch ${tumor_meta.id}_${interval.baseName}.stats
+    touch ${tumor_meta.id}_${interval.baseName}.vcf.gz.stats
+    """
+}
+
+process GATK_MERGEMUTECTSTATS {
+    tag "$meta.id"
+    publishDir "${params.outdir}/variants", mode: 'copy'
+
+    input:
+    tuple val(meta), path(stats_list)
+
+    output:
+    tuple val(meta), path("${meta.id}_merged.vcf.gz.stats"), emit: stats
+
+    script:
+    def stats_args = stats_list.collect { "--stats ${it}" }.join(' ')
+    """
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" MergeMutectStats \\
+      ${stats_args} \\
+      -O ${meta.id}_merged.vcf.gz.stats
+    """
+
+    stub:
+    """
+    touch ${meta.id}_merged.vcf.gz.stats
     """
 }
 
@@ -620,7 +643,7 @@ process GATK_FILTERMUTECTCALLS {
     publishDir "${params.outdir}/variants/filtered", mode: 'copy'
 
     input:
-    tuple val(meta), path(vcf), path(tbi), path(contamination), path(segments), path(orientation_model)
+    tuple val(meta), path(vcf), path(tbi), path(mutect_stats), path(contamination), path(segments), path(orientation_model)
     path reference
     path ref_fai
     path dict_ch
@@ -634,6 +657,7 @@ process GATK_FILTERMUTECTCALLS {
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" FilterMutectCalls \\
       -R ${reference} \\
       -V ${vcf} \\
+      --stats ${mutect_stats} \\
       --contamination-table ${contamination} \\
       --tumor-segmentation ${segments} \\
       --ob-priors ${orientation_model} \\
@@ -1022,12 +1046,18 @@ workflow {
     f1r2_shards = Channel.empty()
         .mix(GATK_MUTECT2_SCATTER.out.f1r2)
         .mix(GATK_MUTECT2_SCATTER_TONLY.out.f1r2)
+    stats_shards = Channel.empty()
+        .mix(GATK_MUTECT2_SCATTER.out.stats)
+        .mix(GATK_MUTECT2_SCATTER_TONLY.out.stats)
 
     vcf_group = vcf_shards
         .map { meta, vcf, tbi -> [meta, vcf] }
         .groupTuple()
     GATK_MERGEVCFS(vcf_group, reference_ch)
     merged_vcf = GATK_MERGEVCFS.out.vcf
+    stats_group = stats_shards.groupTuple()
+    GATK_MERGEMUTECTSTATS(stats_group)
+    merged_stats = GATK_MERGEMUTECTSTATS.out.stats
 
     f1r2_group = f1r2_shards.groupTuple()
     GATK_LEARNREADORIENTATIONMODEL(f1r2_group)
@@ -1054,16 +1084,19 @@ workflow {
 
     // Align channels by sample for filtering
     vcf_k       = merged_vcf.map { meta, vcf, tbi -> [meta.id, meta, vcf, tbi] }
+    stats_k     = merged_stats.map { meta, stats -> [meta.id, stats] }
     contam_k    = contam.map { meta, table -> [meta.id, table] }
     segments_k  = contam_segments.map { meta, seg -> [meta.id, seg] }
     lrom_k      = lrom.map { meta, model -> [meta.id, model] }
 
-    vcf_contam = vcf_k.join(contam_k)
-        .map { key, meta, vcf, tbi, table -> [key, meta, vcf, tbi, table] }
-    vcf_contam_seg = vcf_contam.join(segments_k)
-        .map { key, meta, vcf, tbi, table, seg -> [key, meta, vcf, tbi, table, seg] }
-    filter_input = vcf_contam_seg.join(lrom_k)
-        .map { key, meta, vcf, tbi, table, seg, model -> [meta, vcf, tbi, table, seg, model] }
+    vcf_stats = vcf_k.join(stats_k)
+        .map { key, meta, vcf, tbi, stats -> [key, meta, vcf, tbi, stats] }
+    vcf_stats_contam = vcf_stats.join(contam_k)
+        .map { key, meta, vcf, tbi, stats, table -> [key, meta, vcf, tbi, stats, table] }
+    vcf_stats_contam_seg = vcf_stats_contam.join(segments_k)
+        .map { key, meta, vcf, tbi, stats, table, seg -> [key, meta, vcf, tbi, stats, table, seg] }
+    filter_input = vcf_stats_contam_seg.join(lrom_k)
+        .map { key, meta, vcf, tbi, stats, table, seg, model -> [meta, vcf, tbi, stats, table, seg, model] }
 
     GATK_FILTERMUTECTCALLS(
         filter_input,
