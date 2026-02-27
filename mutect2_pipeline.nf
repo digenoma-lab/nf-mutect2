@@ -446,7 +446,9 @@ process GATK_MUTECT2_SCATTER {
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai), val(normal_meta), path(normal_cram), path(normal_crai)
     path reference
     path ref_fai
+    path dict_ch
     path germline_resource
+    path germline_resource_idx
     val pon
 
     output:
@@ -487,7 +489,9 @@ process GATK_MUTECT2_SCATTER_TONLY {
     tuple path(interval), val(tumor_meta), path(tumor_cram), path(tumor_crai)
     path reference
     path ref_fai
+    path dict_ch
     path germline_resource
+    path germline_resource_idx
     val pon
 
     output:
@@ -808,7 +812,10 @@ workflow {
 
     reference_ch    = Channel.value(file(params.reference))
     known_sites_ch  = Channel.value(file(params.known_sites))
+    known_sites_index = Channel.value(file(params.known_sites+".tbi"))
     germline_ch     = Channel.value(file(params.germline_resource))
+    germline_index    = Channel.value(file(params.germline_resource+".tbi"))
+
     resolve_aln_index = { aln ->
         def p = aln.toString()
         if (p.endsWith('.cram')) {
@@ -1001,8 +1008,8 @@ workflow {
     }
 
 
-    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, reference_fai,  germline_ch, pon_ready)
-    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch,reference_fai, germline_ch, pon_ready)
+    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, reference_fai, dict_ch,   germline_ch, germline_index, pon_ready)
+    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch,reference_fai, dict_ch, germline_ch, germline_index, pon_ready)
 
     vcf_shards = Channel.empty()
         .mix(GATK_MUTECT2_SCATTER.out.vcf)
