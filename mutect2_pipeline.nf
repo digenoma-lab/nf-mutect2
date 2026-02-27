@@ -22,8 +22,11 @@ params.wgs              = true
 params.sample_sheet     = null          // CSV with columns: subject,type,tumor_sample(optional),sample_id,fastq1,fastq2,cram (CRAM/BAM path in `cram`)
 params.canonical_only   = true          // default restrict to autosomes + sex chromosomes
 params.extra_intervals  = null          // BED/interval_list to add non-canonical contigs
+params.exclude_centromeres = false      // when true, pass --exclude-intervals to Mutect2 scatter calls
+params.centromere_intervals = "${projectDir}/aux_files/final_centromere_hg38.seg"
 params.run_bqsr         = false         // optional BQSR; disabled by default
 params.debug            = false
+params.show_help        = false         // print parameter help and exit
 //we declare bwa variables
 params.aligner="bwa-mem2"
 params.alt_js="bwa-postalt.js"
@@ -31,6 +34,48 @@ params.alt_js="bwa-postalt.js"
 // ------------------------------------------------------------------
 // Processes
 // ------------------------------------------------------------------
+
+def printPipelineHelp() {
+    log.info """
+nf-mutect2 parameters
+
+Required:
+  --reference PATH                hg38 FASTA
+  --known_sites PATH              known-sites VCF (.vcf.gz + .tbi)
+  --germline_resource PATH        Mutect2 germline resource VCF (.vcf.gz + .tbi)
+
+Input modes (choose one):
+  --sample_sheet PATH             CSV: subject,type,sample_id,fastq1,fastq2,cram
+  --reads GLOB                    paired FASTQs, e.g. "data/*_{R1,R2}.fastq.gz"
+  --crams GLOB                    aligned BAM/CRAM inputs (indexes required)
+
+Pairing / samples:
+  --tumor_sample STR              required when not using sample sheet
+  --normal_sample STR             optional matched normal for reads/crams mode
+
+PoN options:
+  --panel_of_normals PATH         use existing PoN VCF
+  --pon_crams GLOB                build PoN from normal BAM/CRAMs
+
+Intervals / scatter:
+  --intervals PATH                seed intervals BED/interval_list
+  --canonical_only BOOL           default true (autosomes+sex only)
+  --extra_intervals PATH          add intervals (non-canonical, etc.)
+  --scatter_count INT             default 50
+  --interval_padding INT          default 100
+
+Mutect2 region filtering:
+  --exclude_centromeres BOOL      default false; adds --exclude-intervals
+  --centromere_intervals PATH     default aux_files/final_centromere_hg38.seg
+
+Processing / outputs:
+  --run_bqsr BOOL                 default false
+  --outdir PATH                   default results
+
+Other:
+  --show_help BOOL                print this help and exit
+"""
+}
 
 process GATK_CREATE_DICT {
     tag "$reference.baseName"
@@ -449,6 +494,8 @@ process GATK_MUTECT2_SCATTER {
     path dict_ch
     path germline_resource
     path germline_resource_idx
+    path exclude_intervals, stageAs: 'exclude/*'
+    val use_exclude_intervals
     val pon
 
     output:
@@ -458,6 +505,7 @@ process GATK_MUTECT2_SCATTER {
 
     script:
     def ponArg = pon ? "--panel-of-normals ${pon}" : ""
+    def excludeArg = use_exclude_intervals ? "--exclude-intervals ${exclude_intervals}" : ""
     """
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" Mutect2 \\
       -R ${reference} \\
@@ -467,6 +515,7 @@ process GATK_MUTECT2_SCATTER {
       -normal ${normal_meta.sample} \\
       -L ${interval} \\
       --germline-resource ${germline_resource} \\
+      ${excludeArg} \\
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
@@ -492,6 +541,8 @@ process GATK_MUTECT2_SCATTER_TONLY {
     path dict_ch
     path germline_resource
     path germline_resource_idx
+    path exclude_intervals, stageAs: 'exclude/*'
+    val use_exclude_intervals
     val pon
 
     output:
@@ -501,6 +552,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
 
     script:
     def ponArg = pon ? "--panel-of-normals ${pon}" : ""
+    def excludeArg = use_exclude_intervals ? "--exclude-intervals ${exclude_intervals}" : ""
     """
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" Mutect2 \\
       -R ${reference} \\
@@ -508,6 +560,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
       -tumor ${tumor_meta.sample} \\
       -L ${interval} \\
       --germline-resource ${germline_resource} \\
+      ${excludeArg} \\
       ${ponArg} \\
       --f1r2-tar-gz ${tumor_meta.id}_${interval.baseName}_f1r2.tar.gz \\
       -O ${tumor_meta.id}_${interval.baseName}.vcf.gz
@@ -524,7 +577,7 @@ process GATK_MUTECT2_SCATTER_TONLY {
 
 process GATK_MERGEMUTECTSTATS {
     tag "$meta.id"
-    publishDir "${params.outdir}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variants/raw", mode: 'copy'
 
     input:
     tuple val(meta), path(stats_list)
@@ -548,7 +601,7 @@ process GATK_MERGEMUTECTSTATS {
 
 process GATK_MERGEVCFS {
     tag "$meta.id"
-    publishDir "${params.outdir}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variants/raw", mode: 'copy'
 
     input:
     tuple val(meta), path(vcf_list)
@@ -831,6 +884,11 @@ process GATK_CREATE_SOMATIC_PON {
 // ------------------------------------------------------------------
 
 workflow {
+    if (params.show_help) {
+        printPipelineHelp()
+        return
+    }
+
     if (!params.sample_sheet && !params.reads && !params.crams)
         error "Provide --sample_sheet (preferred) or --reads/--crams"
     if (!params.reference) error "Provide --reference (hg38 FASTA)"
@@ -844,6 +902,10 @@ workflow {
     known_sites_index = Channel.value(file(params.known_sites+".tbi"))
     germline_ch     = Channel.value(file(params.germline_resource))
     germline_index    = Channel.value(file(params.germline_resource+".tbi"))
+    exclude_centromere_flag = Channel.value(params.exclude_centromeres)
+    exclude_intervals_ch = params.exclude_centromeres
+        ? Channel.value(file(params.centromere_intervals))
+        : reference_ch
 
     resolve_aln_index = { aln ->
         def p = aln.toString()
@@ -1037,8 +1099,28 @@ workflow {
     }
 
 
-    GATK_MUTECT2_SCATTER(paired_scatter, reference_ch, reference_fai, dict_ch,   germline_ch, germline_index, pon_ready)
-    GATK_MUTECT2_SCATTER_TONLY(to_scatter, reference_ch,reference_fai, dict_ch, germline_ch, germline_index, pon_ready)
+    GATK_MUTECT2_SCATTER(
+        paired_scatter,
+        reference_ch,
+        reference_fai,
+        dict_ch,
+        germline_ch,
+        germline_index,
+        exclude_intervals_ch,
+        exclude_centromere_flag,
+        pon_ready
+    )
+    GATK_MUTECT2_SCATTER_TONLY(
+        to_scatter,
+        reference_ch,
+        reference_fai,
+        dict_ch,
+        germline_ch,
+        germline_index,
+        exclude_intervals_ch,
+        exclude_centromere_flag,
+        pon_ready
+    )
 
     vcf_shards = Channel.empty()
         .mix(GATK_MUTECT2_SCATTER.out.vcf)

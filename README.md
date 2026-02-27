@@ -86,9 +86,11 @@ If `nextflow` is not on `PATH`, use your local binary, for example:
 ## Notes
 - `--scatter_count` defaults to 50 for WGS; reduce for small panels.
 - Provide `--intervals` (BED or interval_list) to restrict calling; otherwise SplitIntervals shards the whole reference.
+- Optional complex-region filter for Mutect2 scatter: set `--exclude_centromeres true` and optionally override `--centromere_intervals` (default: `aux_files/final_centromere_hg38.seg`).
 - Duplicate marking is assumed to be done during alignment (no extra GATK MarkDuplicates pass).
 - BQSR is optional and disabled by default. Enable with `--run_bqsr true`.
 - Known sites are required for contamination estimation (and for BQSR when enabled).
 - `--germline_resource` is required for all Mutect2 calls.
+- Print pipeline parameter help with `--show_help true`.
 - Resource defaults live in `nextflow.config`; tune per cluster.
 - Tumor-only mode is supported when no normal exists for a subject in the sample sheet; contamination is computed tumor-only and Mutect2 runs without `-normal`.
