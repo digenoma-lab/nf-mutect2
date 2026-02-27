@@ -873,6 +873,7 @@ workflow {
         merged_parts = BWAMEM.out.bams.groupTuple()
         MERGEB(merged_parts, reference_ch)
         crams_from_fastq = MERGEB.out.cram_crai
+        cram_samples.view()
         VALIDATE_CRAM(cram_samples, reference_ch)
         crams_from_cram = VALIDATE_CRAM.out.cram_crai
         crams_valid = crams_from_fastq.mix(crams_from_cram)
