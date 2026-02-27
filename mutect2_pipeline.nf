@@ -65,7 +65,7 @@ Intervals / scatter:
   --interval_padding INT          default 100
 
 Mutect2 region filtering:
-  --exclude_centromeres BOOL      default false; adds --exclude-intervals
+  --exclude_centromeres BOOL      default true; adds --exclude-intervals
   --centromere_intervals PATH     default aux_files/final_centromere_hg38.seg
 
 Processing / outputs:
