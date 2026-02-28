@@ -752,6 +752,8 @@ process GATK_CONTAMINATION {
     tuple val(tumor_meta), path(tumor_cram), path(tumor_crai), val(normal_meta), path(normal_cram), path(normal_crai)
     path known_sites
     path known_sites_index
+    path reference
+    path reference_fai
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_contamination.table"), emit: contamination
@@ -759,8 +761,8 @@ process GATK_CONTAMINATION {
 
     script:
     """
-    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
-    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -I ${normal_cram} -V ${known_sites} -L ${known_sites} -O normal_pileups.table
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries  -R ${reference} -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries  -R ${reference} -I ${normal_cram} -V ${known_sites} -L ${known_sites} -O normal_pileups.table
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CalculateContamination \\
       -I tumor_pileups.table \\
       -matched normal_pileups.table \\
@@ -781,6 +783,8 @@ process GATK_CONTAMINATION_TONLY {
     tuple val(tumor_meta), path(tumor_cram), path(tumor_crai)
     path known_sites
     path known_sites_index
+    path reference
+    path reference_fai
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_contamination.table"), emit: contamination
@@ -788,7 +792,7 @@ process GATK_CONTAMINATION_TONLY {
 
     script:
     """
-    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
+    gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" GetPileupSummaries -R ${reference} -I ${tumor_cram} -V ${known_sites} -L ${known_sites} -O tumor_pileups.table
     gatk --java-options "${task.ext.java_opts ?: '-Xmx10G'}" CalculateContamination \\
       -I tumor_pileups.table \\
       -O ${tumor_meta.id}_contamination.table \\
@@ -1155,8 +1159,8 @@ workflow {
         .map { interval, t_meta, t_cram, t_crai -> [t_meta, t_cram, t_crai] }
         .unique { row -> row[0].id }
 
-    GATK_CONTAMINATION(contam_inputs_paired, known_sites_ch, known_sites_index)
-    GATK_CONTAMINATION_TONLY(contam_inputs_tonly, known_sites_ch, known_sites_index)
+    GATK_CONTAMINATION(contam_inputs_paired, known_sites_ch, known_sites_index, reference_ch, reference_fai)
+    GATK_CONTAMINATION_TONLY(contam_inputs_tonly, known_sites_ch, known_sites_index, reference_ch, reference_fai)
     contam = Channel.empty()
         .mix(GATK_CONTAMINATION.out.contamination)
         .mix(GATK_CONTAMINATION_TONLY.out.contamination)
