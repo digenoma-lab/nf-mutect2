@@ -754,6 +754,7 @@ process GATK_CONTAMINATION {
     path known_sites_index
     path reference
     path reference_fai
+    path dict_ch
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_contamination.table"), emit: contamination
@@ -785,6 +786,7 @@ process GATK_CONTAMINATION_TONLY {
     path known_sites_index
     path reference
     path reference_fai
+    path dict_ch
 
     output:
     tuple val(tumor_meta), path("${tumor_meta.id}_contamination.table"), emit: contamination
@@ -1159,8 +1161,8 @@ workflow {
         .map { interval, t_meta, t_cram, t_crai -> [t_meta, t_cram, t_crai] }
         .unique { row -> row[0].id }
 
-    GATK_CONTAMINATION(contam_inputs_paired, known_sites_ch, known_sites_index, reference_ch, reference_fai)
-    GATK_CONTAMINATION_TONLY(contam_inputs_tonly, known_sites_ch, known_sites_index, reference_ch, reference_fai)
+    GATK_CONTAMINATION(contam_inputs_paired, known_sites_ch, known_sites_index, reference_ch, reference_fai, dict_ch)
+    GATK_CONTAMINATION_TONLY(contam_inputs_tonly, known_sites_ch, known_sites_index, reference_ch, reference_fai, dict_ch)
     contam = Channel.empty()
         .mix(GATK_CONTAMINATION.out.contamination)
         .mix(GATK_CONTAMINATION_TONLY.out.contamination)
